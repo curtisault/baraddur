@@ -2,5 +2,33 @@
 name = "baraddur"
 version = "0.1.0"
 edition = "2024"
+description = "Project-agnostic file watcher that surfaces issues before CI"
+license = "MIT"
+
+[[bin]]
+name = "baraddur"
+path = "src/main.rs"
+
+[lib]
+name = "baraddur"
+path = "src/lib.rs"
 
 [dependencies]
+notify-debouncer-mini = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "signal", "time"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+shell-words = "1"
+dirs = "5"
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
