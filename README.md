@@ -1,4 +1,8 @@
-# baraddur
+# Barad-dûr
+
+<p align="center">
+    <img src="barad-dur.svg" alt="Barad-dûr"
+</p>
 
 A project-agnostic file watcher that runs your check pipeline on every save and
 surfaces failures before CI does.
