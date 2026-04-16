@@ -1,16 +1,22 @@
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub watch: WatchConfig,
 
     #[serde(default)]
     pub output: OutputConfig,
 
+    #[serde(default)]
+    pub summarize: SummarizeConfig,
+
+    #[serde(default)]
     pub steps: Vec<Step>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WatchConfig {
     pub extensions: Vec<String>,
 
@@ -26,6 +32,7 @@ fn default_debounce_ms() -> u64 {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OutputConfig {
     #[serde(default = "default_true")]
     pub clear_screen: bool,
@@ -47,7 +54,52 @@ fn default_true() -> bool {
     true
 }
 
+/// Reserved for Phase 5. Parsed and stored, but not consumed anywhere yet.
+/// Defining it now means `deny_unknown_fields` on `Config` doesn't reject
+/// users who add `[summarize]` early.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SummarizeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default = "default_summarize_cmd")]
+    pub cmd: String,
+
+    #[serde(default = "default_summarize_prompt")]
+    pub prompt: String,
+
+    #[serde(default = "default_summarize_timeout")]
+    pub timeout_secs: u64,
+}
+
+impl Default for SummarizeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cmd: default_summarize_cmd(),
+            prompt: default_summarize_prompt(),
+            timeout_secs: default_summarize_timeout(),
+        }
+    }
+}
+
+fn default_summarize_cmd() -> String {
+    "claude".into()
+}
+
+fn default_summarize_prompt() -> String {
+    "Summarize these check failures in under 5 lines. Focus on root cause \
+     and cite file:line where possible."
+        .into()
+}
+
+fn default_summarize_timeout() -> u64 {
+    15
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Step {
     pub name: String,
     pub cmd: String,
@@ -108,5 +160,55 @@ mod tests {
         assert!(cfg.output.show_passing);
         assert_eq!(cfg.steps.len(), 2);
         assert!(cfg.steps[1].parallel);
+    }
+
+    #[test]
+    fn rejects_unknown_top_level_field() {
+        let src = r#"
+            nonsense = true
+            [watch]
+            extensions = ["rs"]
+            [[steps]]
+            name = "c"
+            cmd = "true"
+        "#;
+        let err = toml::from_str::<Config>(src).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+        assert!(err.to_string().contains("nonsense"));
+    }
+
+    #[test]
+    fn rejects_unknown_step_field() {
+        let src = r#"
+            [watch]
+            extensions = ["rs"]
+            [[steps]]
+            name = "c"
+            cmd = "true"
+            parralel = false
+        "#;
+        let err = toml::from_str::<Config>(src).unwrap_err();
+        assert!(err.to_string().contains("parralel"));
+    }
+
+    #[test]
+    fn accepts_summarize_table() {
+        let src = r#"
+            [watch]
+            extensions = ["rs"]
+
+            [summarize]
+            enabled = true
+            cmd = "claude"
+            timeout_secs = 30
+
+            [[steps]]
+            name = "c"
+            cmd = "true"
+        "#;
+        let cfg: Config = toml::from_str(src).unwrap();
+        assert!(cfg.summarize.enabled);
+        assert_eq!(cfg.summarize.timeout_secs, 30);
+        assert!(cfg.summarize.prompt.contains("Summarize"));
     }
 }

@@ -1,4 +1,4 @@
-use baraddur::config::{Config, OutputConfig, Step, WatchConfig};
+use baraddur::config::{Config, OutputConfig, Step, SummarizeConfig, WatchConfig};
 use baraddur::output::Display;
 use baraddur::pipeline;
 use baraddur::pipeline::StepResult;
@@ -31,6 +31,7 @@ fn make_config(steps: Vec<Step>) -> Config {
             ignore: vec![],
         },
         output: OutputConfig::default(),
+        summarize: SummarizeConfig::default(),
         steps,
     }
 }

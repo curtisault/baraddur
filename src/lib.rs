@@ -18,7 +18,7 @@ pub struct App {
 impl App {
     pub async fn run(self) -> Result<()> {
         eprintln!(
-            "baraddur: watching {} (config: {})",
+            "baraddur: watching {}\n          (config: {})",
             self.root.display(),
             self.config_path.display()
         );

@@ -226,10 +226,10 @@ Options:
 - [ ] Smoke test: watches an Elixir project, runs `mix compile` on change
 
 ### Phase 2 — Config Polish + Ignore Patterns
-- [ ] Validate config on load — surface helpful errors (unknown field, missing cmd, etc.)
+- [x] Validate config on load — surface helpful errors (unknown field, missing cmd, etc.)
 - [x] Implement `ignore` patterns — skip events from ignored paths
-- [ ] Config discovery walk-up (`.baraddur.toml` in parent dirs)
-- [ ] Global `~/.config/baraddur/config.toml` fallback
+- [x] Config discovery walk-up (`.baraddur.toml` in parent dirs)
+- [x] Global `~/.config/baraddur/config.toml` fallback
 - [x] CLI `--config` override
 
 ### Phase 3 — Parallel Execution + Lifecycle + Basic Redraw
