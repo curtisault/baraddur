@@ -18,6 +18,10 @@ struct Cli {
     /// Directory to watch [default: directory containing the discovered config]
     #[arg(short = 'w', long)]
     watch_dir: Option<PathBuf>,
+
+    /// Force non-TTY (append-only) output even on a terminal
+    #[arg(long)]
+    no_tty: bool,
 }
 
 #[tokio::main]
@@ -50,6 +54,7 @@ async fn main() -> ExitCode {
         config: loaded.config,
         config_path: loaded.config_path,
         root,
+        no_tty: cli.no_tty,
     };
 
     match app.run().await {

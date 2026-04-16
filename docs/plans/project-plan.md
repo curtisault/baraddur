@@ -233,16 +233,16 @@ Options:
 - [x] CLI `--config` override
 
 ### Phase 3 — Parallel Execution + Lifecycle + Basic Redraw
-- [ ] `pipeline/mod.rs` — group steps into stages by consecutive `parallel` flag
-- [ ] `pipeline/runner.rs` — parallel stages via `tokio::task::JoinSet`
-- [ ] Collect all parallel step results before deciding to continue
-- [ ] `output/display.rs` — full-block redraw on each state change so parallel
+- [x] `pipeline/mod.rs` — group steps into stages by consecutive `parallel` flag
+- [x] `pipeline/runner.rs` — parallel stages via `tokio::task::JoinSet`
+- [x] Collect all parallel step results before deciding to continue
+- [x] `output/display.rs` — full-block redraw on each state change so parallel
       step statuses can update cleanly (no per-step cursor math yet)
-- [ ] TTY detection at startup (`std::io::IsTerminal`); non-TTY path emits
+- [x] TTY detection at startup (`std::io::IsTerminal`); non-TTY path emits
       append-only line output
-- [ ] Graceful shutdown: trap Ctrl+C, cancel in-flight pipeline, kill children,
+- [x] Graceful shutdown: trap Ctrl+C, cancel in-flight pipeline, kill children,
       double-tap within 2s force-exits
-- [ ] Mid-run cancel+restart: on new file events while pipeline is running,
+- [x] Mid-run cancel+restart: on new file events while pipeline is running,
       abort current run and launch a fresh one
 - [ ] Test with `mix credo` + `mix test --failed` running concurrently
 

@@ -98,7 +98,7 @@ fn default_summarize_timeout() -> u64 {
     15
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
     pub name: String,
