@@ -5,6 +5,9 @@ use tokio::process::Command;
 
 use crate::config::Step;
 
+/// Maximum bytes captured per step. Output beyond this is truncated.
+const MAX_CAPTURE_BYTES: usize = 100 * 1024; // 100 KiB
+
 #[derive(Debug, Clone)]
 pub struct StepResult {
     pub name: String,
@@ -43,8 +46,8 @@ pub async fn run(step: &Step, cwd: &Path) -> Result<StepResult> {
             name: step.name.clone(),
             success: out.status.success(),
             exit_code: out.status.code(),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            stdout: truncate_capture(&out.stdout),
+            stderr: truncate_capture(&out.stderr),
             duration,
         },
         Err(e) => StepResult {
@@ -58,4 +61,14 @@ pub async fn run(step: &Step, cwd: &Path) -> Result<StepResult> {
     };
 
     Ok(result)
+}
+
+fn truncate_capture(bytes: &[u8]) -> String {
+    if bytes.len() <= MAX_CAPTURE_BYTES {
+        String::from_utf8_lossy(bytes).into_owned()
+    } else {
+        let mut s = String::from_utf8_lossy(&bytes[..MAX_CAPTURE_BYTES]).into_owned();
+        s.push_str("\n... [output truncated at 100 KiB] ...\n");
+        s
+    }
 }

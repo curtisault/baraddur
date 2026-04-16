@@ -76,7 +76,7 @@ async fn sequential_stops_at_first_failure() {
     let mut display = RecordingDisplay::default();
     let cwd = std::env::current_dir().unwrap();
 
-    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display)
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None)
         .await
         .unwrap();
 
@@ -116,7 +116,7 @@ async fn sequential_all_pass() {
     let mut display = RecordingDisplay::default();
     let cwd = std::env::current_dir().unwrap();
 
-    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display)
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None)
         .await
         .unwrap();
 
@@ -148,7 +148,7 @@ async fn parallel_steps_all_run() {
     let mut display = RecordingDisplay::default();
     let cwd = std::env::current_dir().unwrap();
 
-    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display)
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None)
         .await
         .unwrap();
 
@@ -190,7 +190,7 @@ async fn parallel_stage_runs_all_even_if_one_fails() {
     let mut display = RecordingDisplay::default();
     let cwd = std::env::current_dir().unwrap();
 
-    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display)
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None)
         .await
         .unwrap();
 
@@ -220,7 +220,7 @@ async fn parallel_wall_clock_is_max_not_sum() {
     let cwd = std::env::current_dir().unwrap();
 
     let start = std::time::Instant::now();
-    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display)
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None)
         .await
         .unwrap();
     let elapsed = start.elapsed();
@@ -257,7 +257,7 @@ async fn mixed_stages_sequential_then_parallel() {
     let mut display = RecordingDisplay::default();
     let cwd = std::env::current_dir().unwrap();
 
-    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display)
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None)
         .await
         .unwrap();
 
@@ -296,7 +296,7 @@ async fn stage_failure_skips_subsequent_stages() {
     let mut display = RecordingDisplay::default();
     let cwd = std::env::current_dir().unwrap();
 
-    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display)
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None)
         .await
         .unwrap();
 
@@ -320,7 +320,7 @@ async fn captures_stdout_and_stderr_on_failure() {
     let mut display = RecordingDisplay::default();
     let cwd = std::env::current_dir().unwrap();
 
-    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display)
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None)
         .await
         .unwrap();
 

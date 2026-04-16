@@ -247,15 +247,15 @@ Options:
 - [ ] Test with `mix credo` + `mix test --failed` running concurrently
 
 ### Phase 4 — Terminal Polish
-- [ ] Clear screen with `crossterm` before each run (respect `--no-clear`)
-- [ ] Colors: green `✓`, red `✗`, yellow `⟳`, cyan section headers, dim metadata
-- [ ] Respect `NO_COLOR` env var; auto-disable in non-TTY mode
-- [ ] Spinner animation for in-progress steps (single shared frame clock)
-- [ ] Step timings right-aligned; short diagnostics inline with failing steps
-- [ ] Output truncation: cap per-step capture at 100 KiB, show head+tail on
+- [x] Clear screen with `crossterm` before each run (respect `--no-clear`)
+- [x] Colors: green `✓`, red `✗`, yellow `⟳`, cyan section headers, dim metadata
+- [x] Respect `NO_COLOR` env var; auto-disable in non-TTY mode
+- [x] Spinner animation for in-progress steps (single shared frame clock)
+- [x] Step timings right-aligned; short diagnostics inline with failing steps
+- [x] Output truncation: cap per-step capture at 100 KiB, show head+tail on
       display; write full capture to `.baraddur/last-run.log`
-- [ ] Verbosity levels: `-q` quiet, default, `-v` verbose, `-vv` debug
-- [ ] Startup banner and idle footer
+- [x] Verbosity levels: `-q` quiet, default, `-v` verbose, `-vv` debug
+- [x] Startup banner and idle footer
 
 ### Phase 5 — LLM Summarization (Optional, Off by Default)
 - [ ] `summarize/mod.rs` — feature is opt-in; off by default

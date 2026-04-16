@@ -4,39 +4,39 @@ pub mod pipeline;
 pub mod watcher;
 
 use anyhow::Result;
-use std::io::IsTerminal as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::output::{Display, PlainDisplay, TtyDisplay};
+use crate::output::{Display, DisplayConfig, PlainDisplay, TtyDisplay};
+use crate::output::style::{should_color, Theme};
 use crate::pipeline::StepResult;
 
 pub struct App {
     pub config: config::Config,
     pub config_path: PathBuf,
     pub root: PathBuf,
-    pub no_tty: bool,
+    pub display_config: DisplayConfig,
 }
 
 impl App {
     pub async fn run(self) -> Result<()> {
-        let is_tty = !self.no_tty && std::io::stdout().is_terminal();
+        let dc = &self.display_config;
+        let color = should_color(dc.is_tty);
 
-        let mut display: Box<dyn Display> = if is_tty {
-            Box::new(TtyDisplay::new())
+        let spinner_interval = if dc.is_tty {
+            Some(Duration::from_millis(80))
         } else {
-            Box::new(PlainDisplay)
+            None
         };
 
-        // Only print the banner in non-TTY mode (TTY mode clears the screen
-        // on each run, so a startup banner would vanish immediately).
-        if !is_tty {
-            eprintln!(
-                "baraddur: watching {}\n          (config: {})",
-                self.root.display(),
-                self.config_path.display(),
-            );
-        }
+        let mut display: Box<dyn Display> = if dc.is_tty {
+            Box::new(TtyDisplay::new(Theme::new(color), dc.verbosity, dc.no_clear))
+        } else {
+            Box::new(PlainDisplay::new(Theme::new(color), dc.verbosity))
+        };
+
+        // Show startup banner once before the first run.
+        display.banner(&self.root, &self.config_path, self.config.steps.len());
 
         let wcfg = watcher::WatchConfig {
             root: self.root.clone(),
@@ -46,9 +46,10 @@ impl App {
         };
         let mut rx = watcher::start(wcfg)?;
 
-        // Main event loop. Each iteration runs the pipeline then idles until
-        // a file change. On mid-run file change, select! drops the pipeline
-        // future (killing children) and we loop back immediately.
+        if dc.verbosity == output::Verbosity::Debug {
+            eprintln!("[debug] watcher started, running initial pipeline");
+        }
+
         loop {
             let outcome = tokio::select! {
                 biased;
@@ -66,6 +67,7 @@ impl App {
                     &self.config,
                     &self.root,
                     display.as_mut(),
+                    spinner_interval,
                 ) => RunOutcome::Completed(result),
             };
 
@@ -73,14 +75,16 @@ impl App {
             // all borrows released. `display` is available again.
             match outcome {
                 RunOutcome::Completed(result) => {
-                    result?;
-                    // Pipeline finished normally — idle-wait below.
+                    let results = result?;
+                    write_run_log(&self.root, &results);
                 }
                 RunOutcome::FileChange => {
-                    // Drain any additional pending triggers.
                     while rx.try_recv().is_ok() {}
+                    if dc.verbosity == output::Verbosity::Debug {
+                        eprintln!("[debug] file change — restarting pipeline");
+                    }
                     display.run_cancelled();
-                    continue; // restart pipeline immediately
+                    continue;
                 }
                 RunOutcome::Shutdown => {
                     return self.shutdown().await;
@@ -92,6 +96,10 @@ impl App {
             }
 
             // ── Idle: wait for the next file change or Ctrl+C ───────────────
+            if dc.verbosity == output::Verbosity::Debug {
+                eprintln!("[debug] idle — waiting for file change");
+            }
+
             tokio::select! {
                 biased;
 
@@ -103,6 +111,9 @@ impl App {
                     match maybe {
                         Some(()) => {
                             while rx.try_recv().is_ok() {}
+                            if dc.verbosity == output::Verbosity::Debug {
+                                eprintln!("[debug] file change — triggering pipeline");
+                            }
                             // fall through to loop top → rerun pipeline
                         }
                         None => {
@@ -115,8 +126,6 @@ impl App {
         }
     }
 
-    /// Handles graceful shutdown. Spawns a background task that listens for
-    /// a second Ctrl+C and force-exits with code 130.
     async fn shutdown(&self) -> Result<()> {
         eprintln!("\nbaraddur: exiting...");
 
@@ -129,6 +138,40 @@ impl App {
 
         Ok(())
     }
+}
+
+/// Writes all step output for the last run to `.baraddur/last-run.log`.
+/// Silently no-ops if the directory cannot be created or the file cannot be written.
+fn write_run_log(root: &Path, results: &[StepResult]) {
+    let log_dir = root.join(".baraddur");
+    if std::fs::create_dir_all(&log_dir).is_err() {
+        return;
+    }
+
+    let mut content = String::new();
+    for r in results {
+        content.push_str(&format!(
+            "═══ {} ({}) ═══\n",
+            r.name,
+            if r.success { "pass" } else { "FAIL" }
+        ));
+        if !r.stdout.is_empty() {
+            content.push_str(&r.stdout);
+            if !r.stdout.ends_with('\n') {
+                content.push('\n');
+            }
+        }
+        if !r.stderr.is_empty() {
+            content.push_str("--- stderr ---\n");
+            content.push_str(&r.stderr);
+            if !r.stderr.ends_with('\n') {
+                content.push('\n');
+            }
+        }
+        content.push('\n');
+    }
+
+    let _ = std::fs::write(log_dir.join("last-run.log"), &content);
 }
 
 enum RunOutcome {
