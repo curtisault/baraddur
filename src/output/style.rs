@@ -89,6 +89,10 @@ impl Theme {
     pub fn yellow<'a>(&self, text: &'a str) -> Styled<'a> {
         self.style(text, |s| s.yellow())
     }
+
+    pub fn selected<'a>(&self, text: &'a str) -> Styled<'a> {
+        self.style(text, |s| s.reverse())
+    }
 }
 
 // ── ANSI-aware string measurement ───────────────────────────────────────────

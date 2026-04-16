@@ -20,6 +20,16 @@ pub struct DisplayConfig {
     pub verbosity: Verbosity,
 }
 
+/// Returned by `Display::handle_key` to tell the caller what to do next.
+pub enum BrowseAction {
+    /// Key was consumed but no visual change is needed.
+    Noop,
+    /// State changed; caller should call `browse_redraw_if_active`.
+    Redraw,
+    /// User pressed `q`; caller should exit browse mode and shut down the app.
+    Quit,
+}
+
 /// Sink for pipeline lifecycle events.
 ///
 /// Implementations:
@@ -51,4 +61,22 @@ pub trait Display: Send {
     /// Advance the spinner animation by one frame. Only redraws if there are
     /// steps in the Running state. Default is a no-op (PlainDisplay).
     fn tick(&mut self) {}
+
+    /// Enter post-run interactive browse mode. Called by the idle loop after
+    /// `run_finished`. Default is a no-op (PlainDisplay).
+    fn enter_browse_mode(&mut self) {}
+
+    /// Exit browse mode. Called when a file change arrives, Ctrl+C is pressed,
+    /// or the user presses `q`. Default is a no-op (PlainDisplay).
+    fn exit_browse_mode(&mut self) {}
+
+    /// Handle a keypress during browse mode. Returns a `BrowseAction` telling
+    /// the caller whether to redraw or exit browse mode. Default is a no-op.
+    fn handle_key(&mut self, _key: crossterm::event::KeyEvent) -> BrowseAction {
+        BrowseAction::Noop
+    }
+
+    /// Redraw the browse step list if browse mode is currently active.
+    /// Default is a no-op (PlainDisplay).
+    fn browse_redraw_if_active(&mut self) {}
 }

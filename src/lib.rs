@@ -7,7 +7,7 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::output::{Display, DisplayConfig, PlainDisplay, TtyDisplay};
+use crate::output::{BrowseAction, Display, DisplayConfig, PlainDisplay, TtyDisplay};
 use crate::output::style::{should_color, Theme};
 use crate::pipeline::StepResult;
 
@@ -50,7 +50,7 @@ impl App {
             eprintln!("[debug] watcher started, running initial pipeline");
         }
 
-        loop {
+        'main: loop {
             let outcome = tokio::select! {
                 biased;
 
@@ -100,6 +100,57 @@ impl App {
                 eprintln!("[debug] idle — waiting for file change");
             }
 
+            // In TTY mode, enter interactive browse mode so the user can
+            // navigate steps and expand output with vim-style keybindings.
+            if dc.is_tty {
+                display.enter_browse_mode();
+
+                loop {
+                    let key_fut = next_key_event();
+                    tokio::pin!(key_fut);
+
+                    tokio::select! {
+                        biased;
+
+                        _ = tokio::signal::ctrl_c() => {
+                            display.exit_browse_mode();
+                            return self.shutdown().await;
+                        }
+
+                        maybe = rx.recv() => {
+                            display.exit_browse_mode();
+                            match maybe {
+                                Some(()) => {
+                                    while rx.try_recv().is_ok() {}
+                                    if dc.verbosity == output::Verbosity::Debug {
+                                        eprintln!("[debug] file change — triggering pipeline");
+                                    }
+                                    continue 'main;
+                                }
+                                None => {
+                                    eprintln!("baraddur: file watcher stopped unexpectedly. exiting.");
+                                    return Ok(());
+                                }
+                            }
+                        }
+
+                        maybe_key = &mut key_fut => {
+                            if let Some(key) = maybe_key {
+                                match display.handle_key(key) {
+                                    BrowseAction::Noop => {}
+                                    BrowseAction::Redraw => display.browse_redraw_if_active(),
+                                    BrowseAction::Quit => {
+                                        display.exit_browse_mode();
+                                        return self.shutdown().await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Plain idle wait: non-TTY mode only (TTY mode loops inside browse above).
             tokio::select! {
                 biased;
 
@@ -138,6 +189,21 @@ impl App {
 
         Ok(())
     }
+}
+
+/// Reads the next keyboard event from stdin without blocking the async executor.
+/// Resize events, mouse events, and other non-key events are silently skipped.
+/// Returns `None` only on terminal read error.
+async fn next_key_event() -> Option<crossterm::event::KeyEvent> {
+    tokio::task::spawn_blocking(|| loop {
+        match crossterm::event::read() {
+            Ok(crossterm::event::Event::Key(k)) => return Some(k),
+            Ok(_) => continue,
+            Err(_) => return None,
+        }
+    })
+    .await
+    .unwrap_or(None)
 }
 
 /// Writes all step output for the last run to `.baraddur/last-run.log`.

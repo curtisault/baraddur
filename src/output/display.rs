@@ -6,8 +6,9 @@ use crossterm::{
     cursor, execute,
     terminal::{self, ClearType},
 };
+use crossterm::event::{KeyCode, KeyEvent};
 
-use super::{Display, Verbosity};
+use super::{BrowseAction, Display, Verbosity};
 use super::style::{Theme, visible_len};
 use crate::pipeline::StepResult;
 
@@ -17,9 +18,9 @@ fn timestamp() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
-/// Prints stdout+stderr with head+tail truncation if the output is long.
-/// Truncated lines reference the log file for the full output.
-fn print_truncated_output(stdout: &str, stderr: &str) {
+/// Formats stdout+stderr with head+tail truncation if the output is long.
+/// Returns a string with `  ` prefix on each line, ready to print.
+fn format_truncated_output(stdout: &str, stderr: &str) -> String {
     let combined = if stderr.is_empty() {
         stdout.to_string()
     } else if stdout.is_empty() {
@@ -34,20 +35,24 @@ fn print_truncated_output(stdout: &str, stderr: &str) {
     const MAX_DISPLAY_LINES: usize = 50;
     const CONTEXT_LINES: usize = 25;
 
+    let mut out = String::new();
     if lines.len() <= MAX_DISPLAY_LINES {
         for line in &lines {
-            println!("  {line}");
+            out.push_str(&format!("  {line}\n"));
         }
     } else {
         for line in &lines[..CONTEXT_LINES] {
-            println!("  {line}");
+            out.push_str(&format!("  {line}\n"));
         }
         let elided = lines.len() - (CONTEXT_LINES * 2);
-        println!("  ... [{elided} lines elided — see .baraddur/last-run.log] ...");
+        out.push_str(&format!(
+            "  ... [{elided} lines elided — see .baraddur/last-run.log] ...\n"
+        ));
         for line in &lines[lines.len() - CONTEXT_LINES..] {
-            println!("  {line}");
+            out.push_str(&format!("  {line}\n"));
         }
     }
+    out
 }
 
 /// Builds a short inline diagnostic from a failing step's output.
@@ -155,7 +160,7 @@ impl Display for PlainDisplay {
         // Print failure output blocks.
         for r in results.iter().filter(|r| !r.success) {
             println!("[{ts}] --- {} output ---", r.name);
-            print_truncated_output(&r.stdout, &r.stderr);
+            print!("{}", format_truncated_output(&r.stdout, &r.stderr));
         }
 
         // In verbose mode, also show passing step output.
@@ -207,7 +212,7 @@ pub struct TtyDisplay {
     step_names: Vec<String>,
     statuses: Vec<StepStatus>,
     name_width: usize,
-    /// How many lines the last `redraw()` printed.
+    /// How many lines the last `redraw()` or `browse_redraw()` printed.
     rendered_lines: u16,
     spinner_frame: usize,
     has_running: bool,
@@ -216,16 +221,36 @@ pub struct TtyDisplay {
     /// step-status block while a pipeline is running.
     #[cfg(unix)]
     original_termios: Option<libc::termios>,
+    // ── Browse mode state ────────────────────────────────────────────────────
+    /// Pre-formatted output per step, captured in `run_finished`.
+    step_outputs: Vec<String>,
+    /// Whether each step's output is shown inline in browse mode.
+    expanded: Vec<bool>,
+    /// Tracks the `O` toggle: true when all steps are expanded.
+    all_expanded: bool,
+    /// Index of the currently highlighted row.
+    cursor: usize,
+    /// True while in the post-run interactive navigation state.
+    browse_active: bool,
+    /// Last key code pressed — used for `gg` double-tap detection.
+    last_key: Option<KeyCode>,
+    /// Whether raw mode is currently enabled (used by Drop for cleanup).
+    raw_mode_active: bool,
 }
 
 impl Drop for TtyDisplay {
     fn drop(&mut self) {
+        if self.raw_mode_active {
+            let _ = terminal::disable_raw_mode();
+            let _ = execute!(std::io::stdout(), cursor::Show);
+        }
         #[cfg(unix)]
         if let Some(t) = self.original_termios {
             unsafe {
                 libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
             }
         }
+        // Non-unix: crossterm disable_raw_mode above is sufficient.
     }
 }
 
@@ -261,6 +286,13 @@ impl TtyDisplay {
             has_running: false,
             #[cfg(unix)]
             original_termios,
+            step_outputs: Vec::new(),
+            expanded: Vec::new(),
+            all_expanded: false,
+            cursor: 0,
+            browse_active: false,
+            last_key: None,
+            raw_mode_active: false,
         }
     }
 
@@ -270,6 +302,52 @@ impl TtyDisplay {
             .unwrap_or(80)
     }
 
+    /// Returns the number of terminal rows a single printed line will occupy,
+    /// accounting for line wrapping at `width` columns.
+    fn visual_rows_for(text: &str, width: usize) -> u16 {
+        let vlen = visible_len(text);
+        if width == 0 || vlen == 0 {
+            1
+        } else {
+            ((vlen + width - 1) / width) as u16
+        }
+    }
+
+    fn term_height() -> u16 {
+        crossterm::terminal::size()
+            .map(|(_, r)| r)
+            .unwrap_or(24)
+    }
+
+    fn raw_mode_on(&mut self) {
+        if terminal::enable_raw_mode().is_ok() {
+            self.raw_mode_active = true;
+            // cfmakeraw() clears two flags we need:
+            // - OPOST: breaks println! because \n no longer implies \r
+            // - ISIG:  breaks Ctrl+C because it no longer generates SIGINT
+            // Re-enable both immediately after so the display and signal
+            // handling continue to work correctly.
+            #[cfg(unix)]
+            unsafe {
+                let mut t: libc::termios = std::mem::zeroed();
+                if libc::tcgetattr(libc::STDIN_FILENO, &mut t) == 0 {
+                    t.c_oflag |= libc::OPOST;
+                    t.c_lflag |= libc::ISIG;
+                    libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
+                }
+            }
+        }
+    }
+
+    fn raw_mode_off(&mut self) {
+        if self.raw_mode_active {
+            let _ = terminal::disable_raw_mode();
+            self.raw_mode_active = false;
+        }
+    }
+
+    /// Redraws the step block in place during a pipeline run (no highlight, no
+    /// expanded output). Uses `rendered_lines` to erase the previous render.
     fn redraw(&mut self) {
         if self.verbosity == Verbosity::Quiet {
             return;
@@ -346,6 +424,116 @@ impl TtyDisplay {
         let _ = stdout.flush();
     }
 
+    /// Redraws the step list for browse mode: includes cursor highlight and
+    /// inline expanded output for toggled steps. Replaces the previous render.
+    fn browse_redraw(&mut self) {
+        let mut stdout = std::io::stdout();
+        let width = Self::term_width();
+        let term_height = Self::term_height();
+
+        if self.rendered_lines > 0 {
+            let move_up = self.rendered_lines.min(term_height.saturating_sub(1));
+            execute!(
+                stdout,
+                cursor::MoveUp(move_up),
+                terminal::Clear(ClearType::FromCursorDown)
+            )
+            .ok();
+        }
+
+        let mut lines = 0u16;
+
+        for (i, name) in self.step_names.iter().enumerate() {
+            let (glyph, diagnostic, duration_str) = match &self.statuses[i] {
+                StepStatus::Queued => (
+                    format!("{}", self.theme.queued_glyph()),
+                    String::new(),
+                    String::new(),
+                ),
+                StepStatus::Running => {
+                    let frame = SPINNER_FRAMES[self.spinner_frame];
+                    (format!("{}", self.theme.yellow(frame)), String::new(), String::new())
+                }
+                StepStatus::Passed(d) => (
+                    format!("{}", self.theme.pass_glyph()),
+                    String::new(),
+                    format!("{:.1}s", d.as_secs_f64()),
+                ),
+                StepStatus::Failed(d, diag) => {
+                    let d_str = format!("{:.1}s", d.as_secs_f64());
+                    let diag_str = if diag.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{}", self.theme.dim(diag))
+                    };
+                    (format!("{}", self.theme.fail_glyph()), diag_str, d_str)
+                }
+                StepStatus::Skipped => (
+                    format!("{}", self.theme.skip_glyph()),
+                    format!("{}", self.theme.dim("skipped")),
+                    String::new(),
+                ),
+            };
+
+            // Cursor-row highlight. In color mode: reverse video on "▸ name".
+            // In no-color mode: swap ▸ for ▶ as a fallback indicator.
+            let arrow = if i == self.cursor && !self.theme.color_enabled() {
+                "▶"
+            } else {
+                "▸"
+            };
+            let raw_prefix = format!("{arrow} {:nw$}", name, nw = self.name_width);
+            let styled_prefix = if i == self.cursor && self.browse_active {
+                format!("{}", self.theme.selected(&raw_prefix))
+            } else {
+                raw_prefix
+            };
+
+            let left = if diagnostic.is_empty() {
+                format!("{styled_prefix}  {glyph}")
+            } else {
+                format!("{styled_prefix}  {glyph}   {diagnostic}")
+            };
+
+            if duration_str.is_empty() {
+                println!("{left}");
+                lines += Self::visual_rows_for(&left, width);
+            } else {
+                let right = format!("{}", self.theme.dim(&duration_str));
+                let left_vis = visible_len(&left);
+                let right_vis = visible_len(&right);
+                let pad = width.saturating_sub(left_vis + right_vis);
+                println!("{left}{:pad$}{right}", "");
+                // With padding, the total visible width is exactly `width` (≤ 1 row).
+                lines += 1;
+            }
+
+            // Inline expanded output.
+            if self.expanded.get(i).copied().unwrap_or(false) {
+                if let Some(output) = self.step_outputs.get(i) {
+                    if !output.is_empty() {
+                        for line in output.lines() {
+                            println!("{line}");
+                            // Long output lines can wrap; count actual visual rows.
+                            lines += Self::visual_rows_for(line, width);
+                        }
+                    }
+                }
+            }
+        }
+
+        if self.browse_active {
+            println!();
+            lines += 1;
+            let help = "  j/k ↑/↓  navigate · Enter/o  toggle output · O  expand all · q  quit";
+            println!("{}", self.theme.dim(help));
+            lines += Self::visual_rows_for(help, width);
+        }
+
+        self.rendered_lines = lines;
+        let _ = stdout.flush();
+    }
+
     fn index_of(&self, name: &str) -> usize {
         self.step_names
             .iter()
@@ -395,6 +583,13 @@ impl Display for TtyDisplay {
         self.name_width = step_names.iter().map(|n| n.len()).max().unwrap_or(0);
         self.rendered_lines = 0;
         self.has_running = false;
+        // Reset browse state for the new run.
+        self.step_outputs = vec![String::new(); step_names.len()];
+        self.expanded = vec![false; step_names.len()];
+        self.all_expanded = false;
+        self.cursor = 0;
+        self.browse_active = false;
+        self.last_key = None;
 
         if self.verbosity == Verbosity::Quiet {
             return;
@@ -459,50 +654,38 @@ impl Display for TtyDisplay {
     }
 
     fn run_finished(&mut self, results: &[StepResult]) {
-        self.rendered_lines = 0;
+        // Keep rendered_lines intact (holds the step-list row count from the last
+        // redraw) so browse_redraw can MoveUp over the step list + footer together
+        // and replace them cleanly in one pass.
         self.has_running = false;
 
+        // Capture outputs and set initial browse state.
+        for r in results {
+            if let Some(idx) = self.step_names.iter().position(|n| n == &r.name) {
+                self.step_outputs[idx] = format_truncated_output(&r.stdout, &r.stderr);
+                self.expanded[idx] = !r.success;
+            }
+        }
+        self.cursor = results
+            .iter()
+            .find(|r| !r.success)
+            .and_then(|r| self.step_names.iter().position(|n| n == &r.name))
+            .unwrap_or(0);
+        self.all_expanded = results.iter().any(|r| !r.success);
+
         if self.verbosity == Verbosity::Quiet && results.iter().all(|r| r.success) {
+            self.rendered_lines = 0;
             return;
         }
 
-        // Print failure output blocks below the step list.
-        let failures: Vec<_> = results.iter().filter(|r| !r.success).collect();
-        if !failures.is_empty() {
-            println!();
-            for r in &failures {
-                let header = format!("── {} output ", r.name);
-                let width = Self::term_width();
-                let fill = "─".repeat(width.saturating_sub(visible_len(&header)));
-                let header_line = format!("{header}{fill}");
-                println!("{}", self.theme.cyan(&header_line));
-                print_truncated_output(&r.stdout, &r.stderr);
-            }
-        }
-
-        // In verbose mode, also show passing step output.
-        if self.verbosity >= Verbosity::Verbose {
-            for r in results.iter().filter(|r| r.success) {
-                if !r.stdout.is_empty() {
-                    println!();
-                    let header = format!("── {} output ", r.name);
-                    let width = Self::term_width();
-                    let fill = "─".repeat(width.saturating_sub(visible_len(&header)));
-                    let header_line = format!("{header}{fill}");
-                    println!("{}", self.theme.cyan(&header_line));
-                    for line in r.stdout.lines() {
-                        println!("  {line}");
-                    }
-                }
-            }
-        }
-
-        // Footer
+        // Footer only — output is shown inline in browse mode, not duplicated here.
         let failed = results.iter().filter(|r| !r.success).count();
         let passed = results.iter().filter(|r| r.success).count();
         let skipped = self.step_names.len().saturating_sub(results.len());
         let total: f64 = results.iter().map(|r| r.duration.as_secs_f64()).sum();
+
         println!();
+        self.rendered_lines += 1;
 
         let mut parts: Vec<String> = Vec::new();
         if failed > 0 {
@@ -523,6 +706,8 @@ impl Display for TtyDisplay {
         parts.push(format!("{}", self.theme.dim(&time_str)));
 
         println!("{}", parts.join(" · "));
+        self.rendered_lines += 1;
+
         let _ = std::io::stdout().flush();
     }
 
@@ -530,6 +715,86 @@ impl Display for TtyDisplay {
         if self.has_running {
             self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
             self.redraw();
+        }
+    }
+
+    fn enter_browse_mode(&mut self) {
+        self.browse_active = true;
+        self.raw_mode_on();
+        let _ = execute!(std::io::stdout(), cursor::Hide);
+        self.browse_redraw();
+    }
+
+    fn exit_browse_mode(&mut self) {
+        // Set browse_active false before the final redraw so the cursor
+        // highlight is not shown in the static post-browse state.
+        self.browse_active = false;
+        self.browse_redraw();
+        self.raw_mode_off();
+        let _ = execute!(std::io::stdout(), cursor::Show);
+    }
+
+    fn browse_redraw_if_active(&mut self) {
+        if self.browse_active {
+            self.browse_redraw();
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> BrowseAction {
+        let n = self.step_names.len();
+        if n == 0 {
+            return if matches!(key.code, KeyCode::Char('q')) {
+                BrowseAction::Quit
+            } else {
+                BrowseAction::Noop
+            };
+        }
+
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.cursor = (self.cursor + 1).min(n - 1);
+                self.last_key = None;
+                BrowseAction::Redraw
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.cursor = self.cursor.saturating_sub(1);
+                self.last_key = None;
+                BrowseAction::Redraw
+            }
+            KeyCode::Char('g') => {
+                if self.last_key == Some(KeyCode::Char('g')) {
+                    self.cursor = 0;
+                    self.last_key = None;
+                    BrowseAction::Redraw
+                } else {
+                    self.last_key = Some(KeyCode::Char('g'));
+                    BrowseAction::Noop
+                }
+            }
+            KeyCode::Char('G') => {
+                self.cursor = n - 1;
+                self.last_key = None;
+                BrowseAction::Redraw
+            }
+            KeyCode::Enter | KeyCode::Char('o') => {
+                self.expanded[self.cursor] = !self.expanded[self.cursor];
+                self.last_key = None;
+                BrowseAction::Redraw
+            }
+            KeyCode::Char('O') => {
+                self.all_expanded = !self.all_expanded;
+                for e in &mut self.expanded {
+                    *e = self.all_expanded;
+                }
+                self.last_key = None;
+                BrowseAction::Redraw
+            }
+            KeyCode::Char('q') => BrowseAction::Quit,
+            _ => {
+                // Any unrecognized key clears the pending `g` chord.
+                self.last_key = None;
+                BrowseAction::Noop
+            }
         }
     }
 }
