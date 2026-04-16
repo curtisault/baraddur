@@ -6,6 +6,9 @@ build:
 release:
     cargo build --release
 
+install: release
+    cp ./target/release/baraddur ~/.local/bin/baraddur
+
 test:
     cargo test
 
