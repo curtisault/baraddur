@@ -211,10 +211,44 @@ pub struct TtyDisplay {
     rendered_lines: u16,
     spinner_frame: usize,
     has_running: bool,
+    /// Original termios saved on construction so we can restore on drop.
+    /// Suppressing echo prevents typed characters from corrupting the redrawn
+    /// step-status block while a pipeline is running.
+    #[cfg(unix)]
+    original_termios: Option<libc::termios>,
+}
+
+impl Drop for TtyDisplay {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(t) = self.original_termios {
+            unsafe {
+                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
+            }
+        }
+    }
 }
 
 impl TtyDisplay {
     pub fn new(theme: Theme, verbosity: Verbosity, no_clear: bool) -> Self {
+        // Disable terminal echo so that keystrokes typed while the pipeline is
+        // running do not appear in the output and corrupt the step-status block.
+        // We clear only ECHO/ECHOE and leave everything else (ISIG, OPOST, …)
+        // untouched so that Ctrl+C still generates SIGINT and println! still
+        // works normally.
+        #[cfg(unix)]
+        let original_termios = unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(libc::STDIN_FILENO, &mut t) == 0 {
+                let backup = t;
+                t.c_lflag &= !(libc::ECHO | libc::ECHOE);
+                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
+                Some(backup)
+            } else {
+                None
+            }
+        };
+
         Self {
             theme,
             verbosity,
@@ -225,6 +259,8 @@ impl TtyDisplay {
             rendered_lines: 0,
             spinner_frame: 0,
             has_running: false,
+            #[cfg(unix)]
+            original_termios,
         }
     }
 
@@ -494,6 +530,100 @@ impl Display for TtyDisplay {
         if self.has_running {
             self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
             self.redraw();
+        }
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[cfg(unix)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Serialize stdin-redirecting tests so they don't race each other.
+    static STDIN_LOCK: Mutex<()> = Mutex::new(());
+
+    fn termios_of(fd: libc::c_int) -> libc::termios {
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            assert_eq!(
+                libc::tcgetattr(fd, &mut t),
+                0,
+                "tcgetattr failed: {}",
+                std::io::Error::last_os_error()
+            );
+            t
+        }
+    }
+
+    /// Opens a pseudo-terminal pair. Returns `(master_fd, slave_fd)`.
+    fn open_pty() -> (libc::c_int, libc::c_int) {
+        let mut master: libc::c_int = -1;
+        let mut slave: libc::c_int = -1;
+        let ret = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(
+            ret,
+            0,
+            "openpty failed: {}",
+            std::io::Error::last_os_error()
+        );
+        (master, slave)
+    }
+
+    #[test]
+    fn tty_display_disables_echo_and_restores_on_drop() {
+        let _guard = STDIN_LOCK.lock().unwrap();
+
+        let (master, slave) = open_pty();
+
+        // Pty slave should start with echo enabled.
+        let before = termios_of(slave);
+        assert_ne!(before.c_lflag & libc::ECHO, 0, "pty should start with echo on");
+
+        // Redirect stdin to the pty slave so TtyDisplay sees a real TTY fd.
+        let saved_stdin = unsafe { libc::dup(libc::STDIN_FILENO) };
+        assert_ne!(saved_stdin, -1);
+        assert_eq!(
+            unsafe { libc::dup2(slave, libc::STDIN_FILENO) },
+            libc::STDIN_FILENO
+        );
+
+        {
+            let _display = TtyDisplay::new(Theme::new(false), Verbosity::Normal, false);
+
+            // Echo must be off while TtyDisplay is alive.
+            let during = termios_of(slave);
+            assert_eq!(
+                during.c_lflag & libc::ECHO,
+                0,
+                "ECHO should be cleared while TtyDisplay is alive"
+            );
+        } // ← TtyDisplay dropped here; Drop restores the original termios.
+
+        // Echo must be back on after drop.
+        let after = termios_of(slave);
+        assert_ne!(
+            after.c_lflag & libc::ECHO,
+            0,
+            "ECHO should be restored after TtyDisplay is dropped"
+        );
+
+        // Clean up.
+        unsafe {
+            libc::dup2(saved_stdin, libc::STDIN_FILENO);
+            libc::close(saved_stdin);
+            libc::close(master);
+            libc::close(slave);
         }
     }
 }

@@ -257,7 +257,22 @@ Options:
 - [x] Verbosity levels: `-q` quiet, default, `-v` verbose, `-vv` debug
 - [x] Startup banner and idle footer
 
-### Phase 5 — LLM Summarization (Optional, Off by Default)
+### Phase 5 — Browse Mode (Post-Run Interactive Navigation)
+- [x] Enter browse mode (S11) automatically after every pipeline run in TTY mode
+- [x] Cursor highlight: reverse-video on `▸ name` in color mode; `▶` glyph
+      fallback when color is disabled
+- [x] Keybindings: `j`/`k`/`↑`/`↓` navigate, `gg` first, `G` last,
+      `Enter`/`o` toggle output, `O` expand-all toggle, `q` quit
+- [x] Initial state on failure: first failing step selected + output pre-expanded
+- [x] Initial state on pass: cursor on row 0, no output expanded
+- [x] Exit browse on file change → cursor/help bar clear, new run starts
+- [x] `q` in browse mode → clean shutdown (same path as Ctrl+C)
+- [x] `enable_raw_mode()` during browse; `OPOST`/`ISIG` re-enabled immediately
+      after so `println!` and Ctrl+C keep working; raw mode restored on exit
+- [x] Echo suppression (`ECHO`/`ECHOE` cleared) during pipeline runs so
+      keystrokes don't corrupt the step-status block; restored on drop
+
+### Phase 6 — LLM Summarization (Optional, Off by Default)
 - [ ] `summarize/mod.rs` — feature is opt-in; off by default
 - [ ] Invoke configured `cmd` via `tokio::process::Command`, pipe step output
       via stdin, prompt template as trailing argument
@@ -270,7 +285,7 @@ Options:
       footer note (`summary skipped (command not found)`)
 - [ ] Render summary in its own section below raw output, cyan divider
 
-### Phase 6 — Distribution
+### Phase 7 — Distribution
 - [ ] GitHub repository: `baraddur`
 - [ ] GitHub Actions CI: `cargo test`, `cargo clippy`, `cargo fmt --check` on PRs
 - [ ] GitHub Actions release: build binaries for `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu` on tag push

@@ -28,6 +28,7 @@
 | Glyph | Meaning |
 |---|---|
 | `▸` | Step indicator (neutral) |
+| `▶` | Selected step cursor (no-color mode only) |
 | `✓` | Passed |
 | `✗` | Failed |
 | `⟳` | Running |
@@ -121,50 +122,89 @@ done.
 
 ### S5 — All passing (terminal state of a successful run)
 
-Same shape as S2. Footer: `all passing · 142 files watched · last run 5.4s`.
-
-### S6 — Failure
+In TTY mode the display immediately transitions into Browse Mode (S11) with the
+cursor on row 0 and no output expanded (all steps passed):
 
 ```
 ━━━ 14:32:08 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-▸ format    ✓   0.2s
-▸ compile   ✓   1.1s
-▸ credo     ✗   3 issues   1.8s
-▸ test      ✓   2.3s
+▶ format    ✓                                                   0.2s
+▸ compile   ✓                                                   1.1s
+▸ credo     ✓                                                   1.8s
+▸ test      ✓                                                   2.3s
 
-── credo output ────────────────────────────────────────────────────
+5 passed · 5.4s
+
+  j/k ↑/↓  navigate · Enter/o  toggle output · O  expand all · q  quit
+```
+
+The user can still navigate and expand any step's output. On file change, browse
+exits and a new run starts (same as S2 → run).
+
+### S6 — Failure (TTY)
+
+After `run_finished`, the display immediately transitions into Browse Mode (S11)
+with the first failing step pre-selected and its output pre-expanded:
+
+```
+━━━ 14:32:08 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+▸ format    ✓                                                   0.2s
+▸ compile   ✓                                                   1.1s
+▶ credo     ✗   3 issues                                        1.8s
   lib/foo.ex:42:3 [C] Modules should have a @moduledoc tag.
   lib/foo.ex:58:5 [R] Function is too complex (cyclomatic: 11).
   lib/bar.ex:17:1 [D] TODO comment found.
-
-── summary ─────────────────────────────────────────────────────────
-3 Credo issues in 2 files. lib/foo.ex needs a @moduledoc and has an
-over-complex function at line 58. lib/bar.ex has a lingering TODO.
+▸ test      ✓                                                   2.3s
 
 1 failed · 3 passed · 5.4s
+
+  j/k ↑/↓  navigate · Enter/o  toggle output · O  expand all · q  quit
 ```
 
 - Failing step's short diagnostic and duration are inline with the step line
-- Raw output block follows
-- LLM summary (if enabled, available, and non-timeout) follows below a cyan
-  divider
-- Footer summarizes the run
+- Output is shown inline under the selected/expanded step (not in a separate
+  block below the step list)
+- LLM summary section (`── summary ──`) is not shown in TTY mode; it was removed
+  when browse mode took over output display
+- Footer summarizes the run; help bar appears below
+- On file change: browse exits, footer/help bar disappear, new run starts
+- `q`: quits baraddur entirely
+
+### S6 — Failure (non-TTY / CI)
+
+Output blocks and optional LLM summary are still printed statically:
+
+```
+[14:32:08] run started
+[14:32:08] format: pass (0.2s)
+[14:32:09] compile: pass (1.1s)
+[14:32:11] credo: FAIL (3 issues, 1.8s)
+[14:32:11] test: pass (2.3s)
+[14:32:11] --- credo output ---
+lib/foo.ex:42:3 [C] Modules should have a @moduledoc tag.
+...
+[14:32:11] run complete: 1 failed, 3 passed, 5.4s
+```
 
 ### S7 — Skipped steps (upstream failure)
+
+After the run completes the display transitions into Browse Mode (S11, TTY) or
+prints output blocks statically (non-TTY). The step list itself looks like:
 
 ```
 ━━━ 14:32:08 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ▸ format    ✓   0.2s
-▸ compile   ✗   warnings as errors   0.9s
+▶ compile   ✗   warnings as errors   0.9s
+  ...
 ▸ credo     ⊘   skipped
 ▸ test      ⊘   skipped
 
-── compile output ──────────────────────────────────────────────────
-  ...
+1 failed · 1 passed · 2 skipped · 0.9s
+
+  j/k ↑/↓  navigate · Enter/o  toggle output · O  expand all · q  quit
 ```
 
-Skipped steps are rendered dim with the `⊘` glyph. No output block, no
-summary, no duration.
+Skipped steps are rendered dim with the `⊘` glyph. No output, no duration for
+skipped steps.
 
 ### S8 — Cancelled mid-run (restart)
 
@@ -230,6 +270,39 @@ dim note appears in the footer: `summary skipped (timeout)` or
 Exits cleanly with code 0. A second Ctrl+C within 2s force-exits with code
 130.
 
+### S11 — Browse Mode (TTY only, post-run)
+
+Entered automatically after every pipeline run in TTY mode. Cursor highlight
+and a help bar appear; the user can navigate steps and expand/collapse output.
+
+**Keybindings:**
+
+| Key | Action |
+|---|---|
+| `j` / `↓` | Move cursor down |
+| `k` / `↑` | Move cursor up |
+| `gg` | Jump to first step |
+| `G` | Jump to last step |
+| `Enter` / `o` | Toggle output for selected step |
+| `O` | Expand all / collapse all (toggle) |
+| `q` | Quit baraddur entirely |
+
+**Cursor highlight:** reverse-video on `▸ name` in color mode; `▶` replaces
+`▸` as a fallback indicator when color is disabled.
+
+**Initial state on entry:**
+- Failure run: first failing step is selected; its output is pre-expanded.
+- Passing run: cursor on row 0; no output expanded.
+
+**Exit conditions:**
+- File change detected → `exit_browse_mode()`, cursor/help bar clear, new run
+  starts at S3.
+- `q` pressed → baraddur shuts down (same as Ctrl+C).
+
+**Terminal mode:** `enable_raw_mode()` is active during browse. `OPOST` and
+`ISIG` are re-enabled immediately after to keep `println!` and Ctrl+C working.
+Raw mode is disabled (and cursor restored) on exit.
+
 ---
 
 ## State Transitions
@@ -241,25 +314,34 @@ Exits cleanly with code 0. A second Ctrl+C within 2s force-exits with code
                 │ initial run
                 ▼
    ┌─────────────────────────────┐
-   │   S3 / S4 Running           │◄────────────────┐
-   └──┬──────────────────────────┘                 │
-      │                                             │
-      │ pipeline complete                           │ file change
-      ▼                                             │ during run
-   ┌─────────────┐                                  │ → S8 cancel
-   │  S5 Pass    │◄──┐                              │ → restart
-   └──────┬──────┘   │                              │
-          │          │ file change                  │
-          ▼          │                              │
-   ┌─────────────┐   │                              │
-   │  S2 Idle    │───┘                              │
-   └──────┬──────┘                                  │
-          │                                          │
-          │ file change                              │
-          └──────────────────────────────────────────┘
+   │   S3 / S4 Running           │◄───────────────────────┐
+   └──┬──────────────────────────┘                        │
+      │                                                    │
+      │ pipeline complete                                  │ file change
+      ▼                                                    │ during run
+   ┌─────────────┐                                         │ → S8 cancel
+   │  S5 Pass    │                                         │ → restart
+   └──────┬──────┘                                         │
+          │ TTY: enter browse (S11)                        │
+          ▼                                                 │
+   ┌──────────────────┐  file change / q                   │
+   │  S11 Browse Mode │─────────────────────────────────► (restart / quit)
+   └──────────────────┘                                    │
+          ▲                                                 │
+          │ TTY: enter browse (S11)                         │
+   ┌─────────────┐                                         │
+   │   S6 Fail   │                                         │
+   └─────────────┘                                         │
+                                                            │
+   non-TTY: S5/S6 → S2 Idle (no browse)                    │
+   ┌─────────────┐                                          │
+   │  S2 Idle    │──────────────────────────────────────────┘
+   └─────────────┘  file change
 
-   Failure path: S3/S4 → (step fails) → remaining steps → S7 → S6 → S2
+   Failure path: S3/S4 → (step fails) → remaining steps → S7 → S6
+                 TTY: S6 → S11 Browse    non-TTY: S6 → S2 Idle
    Shutdown:     any state → S10 → exit
+                 S11: q key → S10
 ```
 
 ---
@@ -271,24 +353,17 @@ Exits cleanly with code 0. A second Ctrl+C within 2s force-exits with code
 Everything above. Full-block redraw with cursor movement, colors, spinner
 animation, screen clearing.
 
+**Echo suppression during pipeline runs:** `ECHO`/`ECHOE` are cleared on
+`TtyDisplay` construction so keystrokes typed while a pipeline is running do
+not corrupt the step-status block. `ISIG` and `OPOST` are preserved. Settings
+are restored on drop.
+
+**Browse mode after each run:** see S11.
+
 ### Non-TTY mode (piped, CI, no terminal)
 
 Line-oriented append-only output. No cursor movement, no clearing, no
-animation, no color (unless `--force-color`).
-
-```
-[14:32:08] run started
-[14:32:08] format: pass (0.2s)
-[14:32:09] compile: pass (1.1s)
-[14:32:11] credo: FAIL (3 issues, 1.8s)
-[14:32:11] test: pass (2.3s)
-[14:32:11] --- credo output ---
-lib/foo.ex:42:3 [C] Modules should have a @moduledoc tag.
-...
-[14:32:11] --- summary ---
-3 Credo issues in 2 files. ...
-[14:32:11] run complete: 1 failed, 3 passed, 5.4s
-```
+animation, no color (unless `--force-color`), no browse mode.
 
 Detection: `std::io::IsTerminal::is_terminal()` on stdout.
 Override: `--no-tty` to force append-only mode even on a TTY (useful for

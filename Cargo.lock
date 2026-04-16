@@ -82,6 +82,7 @@ dependencies = [
  "clap",
  "crossterm",
  "dirs",
+ "libc",
  "notify-debouncer-mini",
  "serde",
  "shell-words",
