@@ -30,8 +30,7 @@ pub async fn run_pipeline(
 
     for stage in &stages {
         if stage_failed {
-            let skipped_names: Vec<String> =
-                stage.steps.iter().map(|s| s.name.clone()).collect();
+            let skipped_names: Vec<String> = stage.steps.iter().map(|s| s.name.clone()).collect();
             display.steps_skipped(&skipped_names);
             continue;
         }

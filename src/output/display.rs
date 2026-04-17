@@ -2,14 +2,14 @@ use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
+use crossterm::event::{KeyCode, KeyEvent};
 use crossterm::{
     cursor, execute,
     terminal::{self, ClearType},
 };
-use crossterm::event::{KeyCode, KeyEvent};
 
-use super::{BrowseAction, Display, Verbosity};
 use super::style::{Theme, visible_len};
+use super::{BrowseAction, Display, Verbosity};
 use crate::pipeline::StepResult;
 
 // ── Shared helpers ───────────────────────────────────────────────────────────
@@ -64,10 +64,7 @@ fn short_diagnostic(result: &StepResult) -> String {
         None => "command not found".into(),
         Some(_) => {
             let combined = format!("{}{}", result.stdout, result.stderr);
-            let non_empty: Vec<&str> = combined
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .collect();
+            let non_empty: Vec<&str> = combined.lines().filter(|l| !l.trim().is_empty()).collect();
             match non_empty.len() {
                 0 => String::new(),
                 1 => {
@@ -189,9 +186,7 @@ impl Display for PlainDisplay {
 
 // ── TTY display (full-block redraw) ─────────────────────────────────────────
 
-const SPINNER_FRAMES: &[&str] = &[
-    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
-];
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Status of a single step, tracked by the display for redraw.
 #[derive(Debug, Clone)]
@@ -309,14 +304,12 @@ impl TtyDisplay {
         if width == 0 || vlen == 0 {
             1
         } else {
-            ((vlen + width - 1) / width) as u16
+            vlen.div_ceil(width) as u16
         }
     }
 
     fn term_height() -> u16 {
-        crossterm::terminal::size()
-            .map(|(_, r)| r)
-            .unwrap_or(24)
+        crossterm::terminal::size().map(|(_, r)| r).unwrap_or(24)
     }
 
     fn raw_mode_on(&mut self) {
@@ -404,7 +397,11 @@ impl TtyDisplay {
             let left = if diagnostic.is_empty() {
                 format!("▸ {:nw$}  {glyph}", name, nw = self.name_width)
             } else {
-                format!("▸ {:nw$}  {glyph}   {diagnostic}", name, nw = self.name_width)
+                format!(
+                    "▸ {:nw$}  {glyph}   {diagnostic}",
+                    name,
+                    nw = self.name_width
+                )
             };
 
             if duration_str.is_empty() {
@@ -452,7 +449,11 @@ impl TtyDisplay {
                 ),
                 StepStatus::Running => {
                     let frame = SPINNER_FRAMES[self.spinner_frame];
-                    (format!("{}", self.theme.yellow(frame)), String::new(), String::new())
+                    (
+                        format!("{}", self.theme.yellow(frame)),
+                        String::new(),
+                        String::new(),
+                    )
                 }
                 StepStatus::Passed(d) => (
                     format!("{}", self.theme.pass_glyph()),
@@ -509,15 +510,13 @@ impl TtyDisplay {
             }
 
             // Inline expanded output.
-            if self.expanded.get(i).copied().unwrap_or(false) {
-                if let Some(output) = self.step_outputs.get(i) {
-                    if !output.is_empty() {
-                        for line in output.lines() {
-                            println!("{line}");
-                            // Long output lines can wrap; count actual visual rows.
-                            lines += Self::visual_rows_for(line, width);
-                        }
-                    }
+            if self.expanded.get(i).copied().unwrap_or(false)
+                && let Some(output) = self.step_outputs.get(i).filter(|o| !o.is_empty())
+            {
+                for line in output.lines() {
+                    println!("{line}");
+                    // Long output lines can wrap; count actual visual rows.
+                    lines += Self::visual_rows_for(line, width);
                 }
             }
         }
@@ -549,7 +548,12 @@ impl Display for TtyDisplay {
         }
 
         let mut stdout = std::io::stdout();
-        execute!(stdout, terminal::Clear(ClearType::All), cursor::MoveTo(0, 0)).ok();
+        execute!(
+            stdout,
+            terminal::Clear(ClearType::All),
+            cursor::MoveTo(0, 0)
+        )
+        .ok();
 
         let width = Self::term_width();
         let version = env!("CARGO_PKG_VERSION");
@@ -853,7 +857,11 @@ mod tests {
 
         // Pty slave should start with echo enabled.
         let before = termios_of(slave);
-        assert_ne!(before.c_lflag & libc::ECHO, 0, "pty should start with echo on");
+        assert_ne!(
+            before.c_lflag & libc::ECHO,
+            0,
+            "pty should start with echo on"
+        );
 
         // Redirect stdin to the pty slave so TtyDisplay sees a real TTY fd.
         let saved_stdin = unsafe { libc::dup(libc::STDIN_FILENO) };

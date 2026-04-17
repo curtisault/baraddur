@@ -7,8 +7,8 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::output::style::{Theme, should_color};
 use crate::output::{BrowseAction, Display, DisplayConfig, PlainDisplay, TtyDisplay};
-use crate::output::style::{should_color, Theme};
 use crate::pipeline::StepResult;
 
 pub struct App {
@@ -30,7 +30,11 @@ impl App {
         };
 
         let mut display: Box<dyn Display> = if dc.is_tty {
-            Box::new(TtyDisplay::new(Theme::new(color), dc.verbosity, dc.no_clear))
+            Box::new(TtyDisplay::new(
+                Theme::new(color),
+                dc.verbosity,
+                dc.no_clear,
+            ))
         } else {
             Box::new(PlainDisplay::new(Theme::new(color), dc.verbosity))
         };
@@ -195,11 +199,13 @@ impl App {
 /// Resize events, mouse events, and other non-key events are silently skipped.
 /// Returns `None` only on terminal read error.
 async fn next_key_event() -> Option<crossterm::event::KeyEvent> {
-    tokio::task::spawn_blocking(|| loop {
-        match crossterm::event::read() {
-            Ok(crossterm::event::Event::Key(k)) => return Some(k),
-            Ok(_) => continue,
-            Err(_) => return None,
+    tokio::task::spawn_blocking(|| {
+        loop {
+            match crossterm::event::read() {
+                Ok(crossterm::event::Event::Key(k)) => return Some(k),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
         }
     })
     .await
