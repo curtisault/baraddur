@@ -101,6 +101,7 @@ pub struct PlainDisplay {
     verbosity: Verbosity,
     trigger_paths: Option<Vec<PathBuf>>,
     run_start: Option<Instant>,
+    run_count: usize,
 }
 
 impl PlainDisplay {
@@ -110,6 +111,7 @@ impl PlainDisplay {
             verbosity,
             trigger_paths: None,
             run_start: None,
+            run_count: 0,
         }
     }
 }
@@ -129,10 +131,11 @@ impl Display for PlainDisplay {
 
     fn run_started(&mut self, _step_names: &[String]) {
         self.run_start = Some(Instant::now());
+        self.run_count += 1;
         if self.verbosity != Verbosity::Quiet {
             let trigger = self.trigger_paths.take();
             let suffix = format_trigger_suffix(trigger.as_deref());
-            println!("[{}] run started{suffix}", timestamp());
+            println!("[{}] run #{} started{suffix}", timestamp(), self.run_count);
         }
     }
 
@@ -261,6 +264,8 @@ pub struct TtyDisplay {
     raw_mode_active: bool,
     /// File(s) that triggered this run. Set by `set_trigger`, consumed by `run_started`.
     trigger_paths: Option<Vec<PathBuf>>,
+    /// Monotonically increasing counter incremented on each `run_started`.
+    run_count: usize,
     /// Plain (unstyled) divider text from `run_started`. Printed as the first line
     /// of every `redraw()` and `browse_redraw()`, colored live from `statuses`.
     run_divider: String,
@@ -329,6 +334,7 @@ impl TtyDisplay {
             last_key: None,
             raw_mode_active: false,
             trigger_paths: None,
+            run_count: 0,
             run_divider: String::new(),
             run_start: None,
             run_summary: String::new(),
@@ -716,6 +722,7 @@ impl Display for TtyDisplay {
 
     fn run_started(&mut self, step_names: &[String]) {
         self.run_start = Some(Instant::now());
+        self.run_count += 1;
         self.step_names = step_names.to_vec();
         self.statuses = vec![StepStatus::Queued; step_names.len()];
         self.name_width = step_names.iter().map(|n| n.len()).max().unwrap_or(0);
@@ -751,7 +758,7 @@ impl Display for TtyDisplay {
         let trigger = self.trigger_paths.take();
         let trigger_str = format_trigger_suffix(trigger.as_deref());
         let width = Self::term_width();
-        let prefix = format!("━━━ {ts}{trigger_str} ");
+        let prefix = format!("━━━ #{} {ts}{trigger_str} ", self.run_count);
         let fill = "━".repeat(width.saturating_sub(visible_len(&prefix)));
         self.run_divider = format!("{prefix}{fill}");
 
