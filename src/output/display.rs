@@ -254,6 +254,9 @@ pub struct TtyDisplay {
     raw_mode_active: bool,
     /// File(s) that triggered this run. Set by `set_trigger`, consumed by `run_started`.
     trigger_paths: Option<Vec<PathBuf>>,
+    /// Terminal row offset for browse-mode viewport scrolling.
+    /// Ensures the cursor step is always visible even when output overflows the screen.
+    browse_scroll: usize,
 }
 
 impl Drop for TtyDisplay {
@@ -312,6 +315,7 @@ impl TtyDisplay {
             last_key: None,
             raw_mode_active: false,
             trigger_paths: None,
+            browse_scroll: 0,
         }
     }
 
@@ -446,23 +450,20 @@ impl TtyDisplay {
     }
 
     /// Redraws the step list for browse mode: includes cursor highlight and
-    /// inline expanded output for toggled steps. Replaces the previous render.
+    /// inline expanded output for toggled steps. Clipped to terminal height
+    /// via a scroll viewport that always keeps the cursor step visible.
     fn browse_redraw(&mut self) {
         let mut stdout = std::io::stdout();
         let width = Self::term_width();
-        let term_height = Self::term_height();
+        let term_height = Self::term_height() as usize;
 
-        if self.rendered_lines > 0 {
-            let move_up = self.rendered_lines.min(term_height.saturating_sub(1));
-            execute!(
-                stdout,
-                cursor::MoveUp(move_up),
-                terminal::Clear(ClearType::FromCursorDown)
-            )
-            .ok();
-        }
-
-        let mut lines = 0u16;
+        // ── Build full content into (text, terminal_rows) pairs ──────────
+        // We build everything first, then apply viewport clipping, so the
+        // scroll logic can see total height before deciding what to render.
+        let mut all_lines: Vec<(String, usize)> = Vec::new();
+        let mut cursor_top_row = 0usize; // terminal row where the cursor step starts
+        let mut cursor_row_height = 1usize;
+        let mut cumulative = 0usize;
 
         for (i, name) in self.step_names.iter().enumerate() {
             let (glyph, diagnostic, duration_str) = match &self.statuses[i] {
@@ -500,8 +501,6 @@ impl TtyDisplay {
                 ),
             };
 
-            // Cursor-row highlight. In color mode: reverse video on "▸ name".
-            // In no-color mode: swap ▸ for ▶ as a fallback indicator.
             let arrow = if i == self.cursor && !self.theme.color_enabled() {
                 "▶"
             } else {
@@ -520,40 +519,89 @@ impl TtyDisplay {
                 format!("{styled_prefix}  {glyph}   {diagnostic}")
             };
 
-            if duration_str.is_empty() {
-                println!("{left}");
-                lines += Self::visual_rows_for(&left, width);
+            let (step_text, step_rows) = if duration_str.is_empty() {
+                let r = Self::visual_rows_for(&left, width) as usize;
+                (left, r)
             } else {
                 let right = format!("{}", self.theme.dim(&duration_str));
                 let left_vis = visible_len(&left);
                 let right_vis = visible_len(&right);
                 let pad = width.saturating_sub(left_vis + right_vis);
-                println!("{left}{:pad$}{right}", "");
-                // With padding, the total visible width is exactly `width` (≤ 1 row).
-                lines += 1;
-            }
+                (format!("{left}{:pad$}{right}", ""), 1)
+            };
 
-            // Inline expanded output.
+            if i == self.cursor {
+                cursor_top_row = cumulative;
+                cursor_row_height = step_rows;
+            }
+            cumulative += step_rows;
+            all_lines.push((step_text, step_rows));
+
             if self.expanded.get(i).copied().unwrap_or(false)
                 && let Some(output) = self.step_outputs.get(i).filter(|o| !o.is_empty())
             {
                 for line in output.lines() {
-                    println!("{line}");
-                    // Long output lines can wrap; count actual visual rows.
-                    lines += Self::visual_rows_for(line, width);
+                    let r = Self::visual_rows_for(line, width) as usize;
+                    cumulative += r;
+                    all_lines.push((line.to_string(), r));
                 }
             }
         }
 
         if self.browse_active {
-            println!();
-            lines += 1;
+            all_lines.push((String::new(), 1));
             let help = "  j/k ↑/↓  navigate · Enter/o  toggle output · O  expand all · q  quit";
-            println!("{}", self.theme.dim(help));
-            lines += Self::visual_rows_for(help, width);
+            all_lines.push((format!("{}", self.theme.dim(help)), 1));
+            cumulative += 2;
         }
 
-        self.rendered_lines = lines;
+        // ── Adjust scroll so cursor step stays in viewport ───────────────
+        // Reserve 1 extra row so the last line never hugs the very bottom.
+        let viewport = term_height.saturating_sub(1);
+        let total_rows = cumulative;
+
+        if cursor_top_row < self.browse_scroll {
+            self.browse_scroll = cursor_top_row;
+        } else if cursor_top_row + cursor_row_height > self.browse_scroll + viewport {
+            self.browse_scroll = cursor_top_row + cursor_row_height - viewport;
+        }
+        self.browse_scroll = self.browse_scroll.min(total_rows.saturating_sub(viewport));
+
+        // ── Erase previous render, then print the viewport ───────────────
+        if self.rendered_lines > 0 {
+            let move_up = self
+                .rendered_lines
+                .min((term_height as u16).saturating_sub(1));
+            execute!(
+                stdout,
+                cursor::MoveUp(move_up),
+                terminal::Clear(ClearType::FromCursorDown)
+            )
+            .ok();
+        }
+
+        let mut skip = self.browse_scroll;
+        let mut rendered = 0usize;
+
+        for (text, rows) in &all_lines {
+            if skip > 0 {
+                if skip >= *rows {
+                    skip -= rows;
+                    continue;
+                }
+                // Partial skip: skip the whole line rather than printing a
+                // truncated middle of a wrapped line.
+                skip = 0;
+                continue;
+            }
+            if rendered >= viewport {
+                break;
+            }
+            println!("{text}");
+            rendered += rows;
+        }
+
+        self.rendered_lines = rendered as u16;
         let _ = stdout.flush();
     }
 
@@ -622,6 +670,7 @@ impl Display for TtyDisplay {
         self.cursor = 0;
         self.browse_active = false;
         self.last_key = None;
+        self.browse_scroll = 0;
 
         if self.verbosity == Verbosity::Quiet {
             return;
