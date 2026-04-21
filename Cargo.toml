@@ -3,7 +3,8 @@ name = "baraddur"
 version = "0.1.0"
 edition = "2024"
 description = "Project-agnostic file watcher that surfaces issues before CI"
-license = "MIT"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/curtisault/baraddur"
 
 [[bin]]
 name = "baraddur"
