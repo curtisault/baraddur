@@ -62,7 +62,7 @@ impl App {
 
                 maybe = rx.recv() => {
                     match maybe {
-                        Some(()) => RunOutcome::FileChange,
+                        Some(paths) => RunOutcome::FileChange(paths),
                         None => RunOutcome::WatcherDied,
                     }
                 }
@@ -82,10 +82,13 @@ impl App {
                     let results = result?;
                     write_run_log(&self.root, &results);
                 }
-                RunOutcome::FileChange => {
+                RunOutcome::FileChange(paths) => {
                     while rx.try_recv().is_ok() {}
                     if dc.verbosity == output::Verbosity::Debug {
                         eprintln!("[debug] file change — restarting pipeline");
+                        for p in &paths {
+                            eprintln!("[debug]   triggered by: {}", p.display());
+                        }
                     }
                     display.run_cancelled();
                     continue;
@@ -124,10 +127,13 @@ impl App {
                         maybe = rx.recv() => {
                             display.exit_browse_mode();
                             match maybe {
-                                Some(()) => {
+                                Some(paths) => {
                                     while rx.try_recv().is_ok() {}
                                     if dc.verbosity == output::Verbosity::Debug {
                                         eprintln!("[debug] file change — triggering pipeline");
+                                        for p in &paths {
+                                            eprintln!("[debug]   triggered by: {}", p.display());
+                                        }
                                     }
                                     continue 'main;
                                 }
@@ -164,10 +170,13 @@ impl App {
 
                 maybe = rx.recv() => {
                     match maybe {
-                        Some(()) => {
+                        Some(paths) => {
                             while rx.try_recv().is_ok() {}
                             if dc.verbosity == output::Verbosity::Debug {
                                 eprintln!("[debug] file change — triggering pipeline");
+                                for p in &paths {
+                                    eprintln!("[debug]   triggered by: {}", p.display());
+                                }
                             }
                             // fall through to loop top → rerun pipeline
                         }
@@ -248,7 +257,7 @@ fn write_run_log(root: &Path, results: &[StepResult]) {
 
 enum RunOutcome {
     Completed(Result<Vec<StepResult>>),
-    FileChange,
+    FileChange(Vec<PathBuf>),
     Shutdown,
     WatcherDied,
 }

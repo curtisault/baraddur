@@ -11,13 +11,12 @@ pub struct WatchConfig {
     pub ignore: Vec<String>,
 }
 
-/// Starts the file watcher on a dedicated OS thread and returns an async receiver
-/// that yields `()` whenever a relevant debounced batch of file events arrives.
-///
-/// The channel is small by design — many events collapsing into one `()` is
-/// the intended behavior. The runner drains the channel after each pipeline run.
-pub fn start(cfg: WatchConfig) -> Result<mpsc::Receiver<()>> {
-    let (tx, rx) = mpsc::channel::<()>(8);
+pub type WatchEvent = Vec<PathBuf>;
+
+/// Starts the file watcher on a dedicated OS thread.
+/// Many FS events collapse into one `WatchEvent`; the runner drains the channel after each run.
+pub fn start(cfg: WatchConfig) -> Result<mpsc::Receiver<WatchEvent>> {
+    let (tx, rx) = mpsc::channel::<WatchEvent>(8);
 
     std::thread::Builder::new()
         .name("baraddur-watcher".into())
@@ -27,7 +26,7 @@ pub fn start(cfg: WatchConfig) -> Result<mpsc::Receiver<()>> {
     Ok(rx)
 }
 
-fn watcher_thread(cfg: WatchConfig, tx: mpsc::Sender<()>) {
+fn watcher_thread(cfg: WatchConfig, tx: mpsc::Sender<WatchEvent>) {
     let (sync_tx, sync_rx) = std::sync::mpsc::channel();
 
     let mut debouncer = match new_debouncer(cfg.debounce, sync_tx) {
@@ -55,9 +54,13 @@ fn watcher_thread(cfg: WatchConfig, tx: mpsc::Sender<()>) {
             }
         };
 
-        let relevant = events.iter().any(|ev| matches_filters(&ev.path, &cfg));
+        let paths: Vec<PathBuf> = events
+            .into_iter()
+            .filter(|ev| matches_filters(&ev.path, &cfg))
+            .map(|ev| ev.path)
+            .collect();
 
-        if relevant && tx.blocking_send(()).is_err() {
+        if !paths.is_empty() && tx.blocking_send(paths).is_err() {
             // Receiver dropped — app is shutting down.
             break;
         }
@@ -65,9 +68,19 @@ fn watcher_thread(cfg: WatchConfig, tx: mpsc::Sender<()>) {
 }
 
 fn matches_filters(path: &std::path::Path, cfg: &WatchConfig) -> bool {
+    let rel = path.strip_prefix(&cfg.root).unwrap_or(path);
+
     for ignored in &cfg.ignore {
-        if path.components().any(|c| c.as_os_str() == ignored.as_str()) {
-            return false;
+        if ignored.contains('/') {
+            // Slash entries match by relative path prefix; plain names match any component.
+            if rel.starts_with(ignored.as_str()) {
+                return false;
+            }
+        } else {
+            // Component entry: match any segment of the path.
+            if path.components().any(|c| c.as_os_str() == ignored.as_str()) {
+                return false;
+            }
         }
     }
 
@@ -131,6 +144,42 @@ mod tests {
         assert!(!matches_filters(
             std::path::Path::new("a/b/_build/c/foo.ex"),
             &cfg(&["ex"], &["_build"])
+        ));
+    }
+
+    fn cfg_with_root(root: &str, exts: &[&str], ignore: &[&str]) -> WatchConfig {
+        WatchConfig {
+            root: PathBuf::from(root),
+            debounce: Duration::from_millis(1000),
+            extensions: exts.iter().map(|s| s.to_string()).collect(),
+            ignore: ignore.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn path_style_ignore_rejects_specific_file() {
+        let c = cfg_with_root("/project", &["ex"], &["lib/tss_web/storybook.ex"]);
+        assert!(!matches_filters(
+            std::path::Path::new("/project/lib/tss_web/storybook.ex"),
+            &c
+        ));
+    }
+
+    #[test]
+    fn path_style_ignore_allows_sibling_file() {
+        let c = cfg_with_root("/project", &["ex"], &["lib/tss_web/storybook.ex"]);
+        assert!(matches_filters(
+            std::path::Path::new("/project/lib/tss_web/other.ex"),
+            &c
+        ));
+    }
+
+    #[test]
+    fn path_style_ignore_rejects_subtree() {
+        let c = cfg_with_root("/project", &["ex"], &["lib/generated"]);
+        assert!(!matches_filters(
+            std::path::Path::new("/project/lib/generated/foo.ex"),
+            &c
         ));
     }
 }
