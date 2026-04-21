@@ -1,6 +1,6 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use crossterm::{
@@ -100,6 +100,7 @@ pub struct PlainDisplay {
     theme: Theme,
     verbosity: Verbosity,
     trigger_paths: Option<Vec<PathBuf>>,
+    run_start: Option<Instant>,
 }
 
 impl PlainDisplay {
@@ -108,6 +109,7 @@ impl PlainDisplay {
             theme,
             verbosity,
             trigger_paths: None,
+            run_start: None,
         }
     }
 }
@@ -126,6 +128,7 @@ impl Display for PlainDisplay {
     }
 
     fn run_started(&mut self, _step_names: &[String]) {
+        self.run_start = Some(Instant::now());
         if self.verbosity != Verbosity::Quiet {
             let trigger = self.trigger_paths.take();
             let suffix = format_trigger_suffix(trigger.as_deref());
@@ -195,10 +198,14 @@ impl Display for PlainDisplay {
 
         let failed = results.iter().filter(|r| !r.success).count();
         let passed = results.iter().filter(|r| r.success).count();
-        let total: f64 = results.iter().map(|r| r.duration.as_secs_f64()).sum();
+        let elapsed = self
+            .run_start
+            .take()
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or_else(|| results.iter().map(|r| r.duration.as_secs_f64()).sum());
 
         if self.verbosity != Verbosity::Quiet || failed > 0 {
-            println!("[{ts}] run complete: {failed} failed, {passed} passed, {total:.1}s");
+            println!("[{ts}] run complete: {failed} failed, {passed} passed, {elapsed:.1}s");
         }
 
         let _ = std::io::stdout().flush();
@@ -254,9 +261,13 @@ pub struct TtyDisplay {
     raw_mode_active: bool,
     /// File(s) that triggered this run. Set by `set_trigger`, consumed by `run_started`.
     trigger_paths: Option<Vec<PathBuf>>,
-    /// Plain (unstyled) divider text from `run_started`. Used in `run_finished` to
-    /// recolor it green (all pass) or red (any failure) in-place.
+    /// Plain (unstyled) divider text from `run_started`. Printed as the first line
+    /// of every `redraw()` and `browse_redraw()`, colored live from `statuses`.
     run_divider: String,
+    /// Wall-clock start time of the current run, for accurate elapsed time in the footer.
+    run_start: Option<Instant>,
+    /// Pre-formatted summary line from `run_finished`, shown persistently in browse mode.
+    run_summary: String,
     /// Terminal row offset for browse-mode viewport scrolling.
     /// Ensures the cursor step is always visible even when output overflows the screen.
     browse_scroll: usize,
@@ -319,6 +330,8 @@ impl TtyDisplay {
             raw_mode_active: false,
             trigger_paths: None,
             run_divider: String::new(),
+            run_start: None,
+            run_summary: String::new(),
             browse_scroll: 0,
         }
     }
@@ -391,6 +404,11 @@ impl TtyDisplay {
         }
 
         let mut lines = 0u16;
+
+        if !self.run_divider.is_empty() {
+            println!("{}", self.divider_styled());
+            lines += 1;
+        }
 
         for (i, name) in self.step_names.iter().enumerate() {
             let (glyph, diagnostic, duration_str) = match &self.statuses[i] {
@@ -468,6 +486,11 @@ impl TtyDisplay {
         let mut cursor_top_row = 0usize; // terminal row where the cursor step starts
         let mut cursor_row_height = 1usize;
         let mut cumulative = 0usize;
+
+        if !self.run_divider.is_empty() {
+            all_lines.push((self.divider_styled(), 1));
+            cumulative += 1;
+        }
 
         for (i, name) in self.step_names.iter().enumerate() {
             let (glyph, diagnostic, duration_str) = match &self.statuses[i] {
@@ -554,6 +577,11 @@ impl TtyDisplay {
 
         if self.browse_active {
             all_lines.push((String::new(), 1));
+            if !self.run_summary.is_empty() {
+                all_lines.push((self.run_summary.clone(), 1));
+                all_lines.push((String::new(), 1));
+                cumulative += 2;
+            }
             let help = "  j/k ↑/↓  navigate · Enter/o  toggle output · O  expand all · q  quit";
             all_lines.push((format!("{}", self.theme.dim(help)), 1));
             cumulative += 2;
@@ -615,6 +643,31 @@ impl TtyDisplay {
             .position(|n| n == name)
             .unwrap_or_else(|| panic!("unknown step `{name}`"))
     }
+
+    /// Returns the run divider styled with the appropriate color based on step statuses.
+    /// Dim while steps are still running/queued; green when all settled and passed;
+    /// red when all settled and any failed.
+    fn divider_styled(&self) -> String {
+        if self.run_divider.is_empty() {
+            return String::new();
+        }
+        let all_settled = self
+            .statuses
+            .iter()
+            .all(|s| !matches!(s, StepStatus::Running | StepStatus::Queued));
+        let any_failed = self
+            .statuses
+            .iter()
+            .any(|s| matches!(s, StepStatus::Failed(..)));
+
+        if all_settled && any_failed {
+            format!("{}", self.theme.red(&self.run_divider))
+        } else if all_settled {
+            format!("{}", self.theme.green(&self.run_divider))
+        } else {
+            format!("{}", self.theme.dim(&self.run_divider))
+        }
+    }
 }
 
 impl Display for TtyDisplay {
@@ -662,6 +715,7 @@ impl Display for TtyDisplay {
     }
 
     fn run_started(&mut self, step_names: &[String]) {
+        self.run_start = Some(Instant::now());
         self.step_names = step_names.to_vec();
         self.statuses = vec![StepStatus::Queued; step_names.len()];
         self.name_width = step_names.iter().map(|n| n.len()).max().unwrap_or(0);
@@ -691,16 +745,15 @@ impl Display for TtyDisplay {
             .ok();
         }
 
-        // Timestamp divider — includes trigger file if this is a file-change restart.
+        // Build and store the divider text. redraw() will print it (as its first line)
+        // and recolor it live based on statuses, so no println! or cursor position needed.
         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
         let trigger = self.trigger_paths.take();
         let trigger_str = format_trigger_suffix(trigger.as_deref());
         let width = Self::term_width();
         let prefix = format!("━━━ {ts}{trigger_str} ");
         let fill = "━".repeat(width.saturating_sub(visible_len(&prefix)));
-        let divider = format!("{prefix}{fill}");
-        self.run_divider = divider.clone();
-        println!("{}", self.theme.dim(&divider));
+        self.run_divider = format!("{prefix}{fill}");
 
         self.redraw();
     }
@@ -770,28 +823,11 @@ impl Display for TtyDisplay {
         let failed = results.iter().filter(|r| !r.success).count();
         let passed = results.iter().filter(|r| r.success).count();
         let skipped = self.step_names.len().saturating_sub(results.len());
-        let total: f64 = results.iter().map(|r| r.duration.as_secs_f64()).sum();
-
-        // Recolor the divider in-place: green for all-pass, red for any failure.
-        // Cursor is currently just below the step list (rendered_lines rows below
-        // the divider), so MoveUp(rendered_lines + 1) reaches the divider row.
-        if !self.run_divider.is_empty() && self.rendered_lines > 0 {
-            let mut stdout = std::io::stdout();
-            let colored = if failed == 0 {
-                format!("{}", self.theme.green(&self.run_divider))
-            } else {
-                format!("{}", self.theme.red(&self.run_divider))
-            };
-            execute!(
-                stdout,
-                cursor::SavePosition,
-                cursor::MoveUp(self.rendered_lines + 1),
-            )
-            .ok();
-            print!("{colored}");
-            let _ = stdout.flush();
-            execute!(stdout, cursor::RestorePosition).ok();
-        }
+        let elapsed = self
+            .run_start
+            .take()
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or_else(|| results.iter().map(|r| r.duration.as_secs_f64()).sum());
 
         println!();
         self.rendered_lines += 1;
@@ -808,13 +844,15 @@ impl Display for TtyDisplay {
             parts.push(format!("{}", self.theme.dim(&s)));
         }
         let time_str = if failed == 0 {
-            format!("all passing · {total:.1}s")
+            format!("all passing · {elapsed:.1}s")
         } else {
-            format!("{total:.1}s")
+            format!("{elapsed:.1}s")
         };
         parts.push(format!("{}", self.theme.dim(&time_str)));
 
-        println!("{}", parts.join(" · "));
+        let summary = parts.join(" · ");
+        self.run_summary = summary.clone();
+        println!("{summary}");
         self.rendered_lines += 1;
 
         let _ = std::io::stdout().flush();
