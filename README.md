@@ -8,13 +8,20 @@ A project-agnostic file watcher that runs your check pipeline on every save and
 surfaces failures before CI does.
 
 ```
-━━━ 14:32:08 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━ #1 14:32:08 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ▸ format    ✓                                                   0.2s
 ▸ compile   ✓                                                   1.1s
 ▸ credo     ✗   3 issues                                        1.8s
 ▸ test      ✓                                                   2.3s
 
 1 failed · 3 passed · 5.4s
+```
+
+The divider turns green when all steps pass and red when any fail. On file-change
+restarts it also shows which file triggered the run:
+
+```
+━━━ #2 14:33:01  ·  lib/foo.ex ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
 After the run completes, baraddur enters browse mode — navigate the step list
@@ -99,7 +106,7 @@ A global fallback lives at `~/.config/baraddur/config.toml`.
 [watch]
 extensions = ["ex", "exs", "heex"]  # file extensions to watch
 debounce_ms = 1000                  # wait this long after the last event before running
-ignore = ["_build", "deps", ".git"] # directory names to skip anywhere in the path
+ignore = ["_build", "deps", ".git", ".expert"] # names match any path component; paths with / match by prefix
 
 [output]
 # no options currently — controlled via CLI flags
@@ -179,7 +186,7 @@ spinner, and interactive browse mode after each run. When stdout is not a
 terminal (piped, CI), it falls back to plain append-only lines with timestamps:
 
 ```
-[14:32:08] run started
+[14:32:08] run #1 started
 [14:32:08] ▸ format running
 [14:32:08] ▸ format  ✓  (0.2s)
 [14:32:09] ▸ compile  ✓  (1.1s)
