@@ -254,6 +254,9 @@ pub struct TtyDisplay {
     raw_mode_active: bool,
     /// File(s) that triggered this run. Set by `set_trigger`, consumed by `run_started`.
     trigger_paths: Option<Vec<PathBuf>>,
+    /// Plain (unstyled) divider text from `run_started`. Used in `run_finished` to
+    /// recolor it green (all pass) or red (any failure) in-place.
+    run_divider: String,
     /// Terminal row offset for browse-mode viewport scrolling.
     /// Ensures the cursor step is always visible even when output overflows the screen.
     browse_scroll: usize,
@@ -315,6 +318,7 @@ impl TtyDisplay {
             last_key: None,
             raw_mode_active: false,
             trigger_paths: None,
+            run_divider: String::new(),
             browse_scroll: 0,
         }
     }
@@ -695,6 +699,7 @@ impl Display for TtyDisplay {
         let prefix = format!("━━━ {ts}{trigger_str} ");
         let fill = "━".repeat(width.saturating_sub(visible_len(&prefix)));
         let divider = format!("{prefix}{fill}");
+        self.run_divider = divider.clone();
         println!("{}", self.theme.dim(&divider));
 
         self.redraw();
@@ -766,6 +771,27 @@ impl Display for TtyDisplay {
         let passed = results.iter().filter(|r| r.success).count();
         let skipped = self.step_names.len().saturating_sub(results.len());
         let total: f64 = results.iter().map(|r| r.duration.as_secs_f64()).sum();
+
+        // Recolor the divider in-place: green for all-pass, red for any failure.
+        // Cursor is currently just below the step list (rendered_lines rows below
+        // the divider), so MoveUp(rendered_lines + 1) reaches the divider row.
+        if !self.run_divider.is_empty() && self.rendered_lines > 0 {
+            let mut stdout = std::io::stdout();
+            let colored = if failed == 0 {
+                format!("{}", self.theme.green(&self.run_divider))
+            } else {
+                format!("{}", self.theme.red(&self.run_divider))
+            };
+            execute!(
+                stdout,
+                cursor::SavePosition,
+                cursor::MoveUp(self.rendered_lines + 1),
+            )
+            .ok();
+            print!("{colored}");
+            let _ = stdout.flush();
+            execute!(stdout, cursor::RestorePosition).ok();
+        }
 
         println!();
         self.rendered_lines += 1;
