@@ -91,6 +91,7 @@ impl App {
                         }
                     }
                     display.run_cancelled();
+                    display.set_trigger(&rel_paths(&paths, &self.root));
                     continue;
                 }
                 RunOutcome::Shutdown => {
@@ -135,6 +136,7 @@ impl App {
                                             eprintln!("[debug]   triggered by: {}", p.display());
                                         }
                                     }
+                                    display.set_trigger(&rel_paths(&paths, &self.root));
                                     continue 'main;
                                 }
                                 None => {
@@ -178,6 +180,7 @@ impl App {
                                     eprintln!("[debug]   triggered by: {}", p.display());
                                 }
                             }
+                            display.set_trigger(&rel_paths(&paths, &self.root));
                             // fall through to loop top → rerun pipeline
                         }
                         None => {
@@ -253,6 +256,13 @@ fn write_run_log(root: &Path, results: &[StepResult]) {
     }
 
     let _ = std::fs::write(log_dir.join("last-run.log"), &content);
+}
+
+fn rel_paths(paths: &[PathBuf], root: &Path) -> Vec<PathBuf> {
+    paths
+        .iter()
+        .map(|p| p.strip_prefix(root).unwrap_or(p).to_path_buf())
+        .collect()
 }
 
 enum RunOutcome {

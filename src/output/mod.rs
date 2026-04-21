@@ -4,7 +4,7 @@ pub use display::{PlainDisplay, TtyDisplay};
 pub use style::Theme;
 
 use crate::pipeline::StepResult;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Verbosity {
@@ -54,6 +54,11 @@ pub trait Display: Send {
 
     /// The run completed normally.
     fn run_finished(&mut self, results: &[StepResult]);
+
+    /// Store the file(s) that triggered this run. Called just before the next
+    /// `run_started` when a file-change restart occurs. Not called for the
+    /// initial run. Implementations should consume and clear on `run_started`.
+    fn set_trigger(&mut self, _paths: &[PathBuf]) {}
 
     /// Show the startup banner. Called once before the first pipeline run.
     fn banner(&mut self, _root: &Path, _config_path: &Path, _step_count: usize) {}

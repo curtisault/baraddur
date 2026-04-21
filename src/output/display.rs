@@ -1,5 +1,5 @@
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -82,6 +82,16 @@ fn short_diagnostic(result: &StepResult) -> String {
     }
 }
 
+/// Formats the trigger suffix for a run divider/header.
+/// Single file → `"  ·  lib/foo.ex"`, multiple → `"  ·  3 files"`, none → `""`.
+fn format_trigger_suffix(paths: Option<&[PathBuf]>) -> String {
+    match paths {
+        Some([p]) => format!("  ·  {}", p.display()),
+        Some(ps) => format!("  ·  {} files", ps.len()),
+        None => String::new(),
+    }
+}
+
 // ── Non-TTY display (append-only) ───────────────────────────────────────────
 
 /// Append-only line output for non-TTY contexts (piped, CI, `--no-tty`).
@@ -89,15 +99,24 @@ fn short_diagnostic(result: &StepResult) -> String {
 pub struct PlainDisplay {
     theme: Theme,
     verbosity: Verbosity,
+    trigger_paths: Option<Vec<PathBuf>>,
 }
 
 impl PlainDisplay {
     pub fn new(theme: Theme, verbosity: Verbosity) -> Self {
-        Self { theme, verbosity }
+        Self {
+            theme,
+            verbosity,
+            trigger_paths: None,
+        }
     }
 }
 
 impl Display for PlainDisplay {
+    fn set_trigger(&mut self, paths: &[PathBuf]) {
+        self.trigger_paths = Some(paths.to_vec());
+    }
+
     fn banner(&mut self, root: &Path, config_path: &Path, _step_count: usize) {
         eprintln!(
             "baraddur: watching {}\n          (config: {})",
@@ -108,7 +127,9 @@ impl Display for PlainDisplay {
 
     fn run_started(&mut self, _step_names: &[String]) {
         if self.verbosity != Verbosity::Quiet {
-            println!("[{}] run started", timestamp());
+            let trigger = self.trigger_paths.take();
+            let suffix = format_trigger_suffix(trigger.as_deref());
+            println!("[{}] run started{suffix}", timestamp());
         }
     }
 
@@ -231,6 +252,8 @@ pub struct TtyDisplay {
     last_key: Option<KeyCode>,
     /// Whether raw mode is currently enabled (used by Drop for cleanup).
     raw_mode_active: bool,
+    /// File(s) that triggered this run. Set by `set_trigger`, consumed by `run_started`.
+    trigger_paths: Option<Vec<PathBuf>>,
 }
 
 impl Drop for TtyDisplay {
@@ -288,6 +311,7 @@ impl TtyDisplay {
             browse_active: false,
             last_key: None,
             raw_mode_active: false,
+            trigger_paths: None,
         }
     }
 
@@ -542,6 +566,10 @@ impl TtyDisplay {
 }
 
 impl Display for TtyDisplay {
+    fn set_trigger(&mut self, paths: &[PathBuf]) {
+        self.trigger_paths = Some(paths.to_vec());
+    }
+
     fn banner(&mut self, root: &Path, config_path: &Path, step_count: usize) {
         if self.verbosity == Verbosity::Quiet {
             return;
@@ -610,10 +638,12 @@ impl Display for TtyDisplay {
             .ok();
         }
 
-        // Timestamp divider
+        // Timestamp divider — includes trigger file if this is a file-change restart.
         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+        let trigger = self.trigger_paths.take();
+        let trigger_str = format_trigger_suffix(trigger.as_deref());
         let width = Self::term_width();
-        let prefix = format!("━━━ {ts} ");
+        let prefix = format!("━━━ {ts}{trigger_str} ");
         let fill = "━".repeat(width.saturating_sub(visible_len(&prefix)));
         let divider = format!("{prefix}{fill}");
         println!("{}", self.theme.dim(&divider));
