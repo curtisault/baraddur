@@ -50,7 +50,36 @@ cargo build --release && cp ./target/release/baraddur ~/.local/bin/baraddur
 ## Quick start
 
 Create a `.baraddur.toml` in your project root and run `baraddur` from anywhere
-inside that project:
+inside that project. See [Config examples](#examples) below for common stacks.
+
+baraddur runs the pipeline immediately on launch, then re-runs it on every file
+change. Steps are killed and restarted if a file changes mid-run.
+
+## Browse mode
+
+After each run, baraddur enters an interactive browse mode:
+
+| Key | Action |
+|---|---|
+| `j` / `↓` | move cursor down |
+| `k` / `↑` | move cursor up |
+| `gg` | jump to first step |
+| `G` | jump to last step |
+| `Enter` / `o` | toggle output for selected step |
+| `O` | expand all / collapse all |
+| `q` | quit baraddur |
+
+Failing steps start with their output expanded. Save a file to exit browse mode
+and rerun the pipeline immediately.
+
+## Config
+
+Config is discovered by walking up from the current directory (like `.gitignore`).
+A global fallback lives at `~/.config/baraddur/config.toml`.
+
+### Examples
+
+#### Rust / Cargo
 
 ```toml
 [watch]
@@ -69,10 +98,7 @@ cmd = "cargo test"
 parallel = false
 ```
 
-baraddur runs the pipeline immediately on launch, then re-runs it on every file
-change. Steps are killed and restarted if a file changes mid-run.
-
-### TypeScript / Node.js
+#### TypeScript / Node.js
 
 ```toml
 [watch]
@@ -101,30 +127,36 @@ parallel = true
 ```
 
 All three steps run concurrently as a single stage. Swap in `eslint`, `prettier`,
-or any other tool you prefer — the only constraint is that each `cmd` must be a
-plain executable invocation (no shell pipes; use `sh -c '...'` if you need them).
+or any other tool you prefer.
 
-## Browse mode
+#### Elixir / Mix
 
-After each run, baraddur enters an interactive browse mode:
+```toml
+[watch]
+extensions = ["ex", "exs", "heex"]
+debounce_ms = 500
+ignore = ["_build", "deps", ".git", ".baraddur"]
 
-| Key | Action |
-|---|---|
-| `j` / `↓` | move cursor down |
-| `k` / `↑` | move cursor up |
-| `gg` | jump to first step |
-| `G` | jump to last step |
-| `Enter` / `o` | toggle output for selected step |
-| `O` | expand all / collapse all |
-| `q` | quit baraddur |
+[[steps]]
+name = "format"
+cmd = "mix format --check-formatted"
+parallel = false
 
-Failing steps start with their output expanded. Save a file to exit browse mode
-and rerun the pipeline immediately.
+[[steps]]
+name = "compile"
+cmd = "mix compile --warnings-as-errors"
+parallel = false
 
-## Config
+[[steps]]
+name = "credo"
+cmd = "mix credo"
+parallel = true
 
-Config is discovered by walking up from the current directory (like `.gitignore`).
-A global fallback lives at `~/.config/baraddur/config.toml`.
+[[steps]]
+name = "test"
+cmd = "mix test --failed"
+parallel = true
+```
 
 ### Full schema
 
