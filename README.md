@@ -42,12 +42,6 @@ and expand output inline:
 ## Install
 
 ```bash
-cargo install --path .
-```
-
-Or build and install a release binary directly:
-
-```bash
 just install
 # or manually:
 cargo build --release && cp ./target/release/baraddur ~/.local/bin/baraddur
@@ -77,6 +71,38 @@ parallel = false
 
 baraddur runs the pipeline immediately on launch, then re-runs it on every file
 change. Steps are killed and restarted if a file changes mid-run.
+
+### TypeScript / Node.js
+
+```toml
+[watch]
+extensions = ["ts", "tsx"]
+debounce_ms = 500
+ignore = ["node_modules", "dist", ".baraddur"]
+
+[output]
+clear_screen = true
+show_passing = false
+
+[[steps]]
+name = "lint"
+cmd = "npx biome check ."
+parallel = true
+
+[[steps]]
+name = "type-check"
+cmd = "npx tsc --noEmit"
+parallel = true
+
+[[steps]]
+name = "unused-exports"
+cmd = "npx knip"
+parallel = true
+```
+
+All three steps run concurrently as a single stage. Swap in `eslint`, `prettier`,
+or any other tool you prefer — the only constraint is that each `cmd` must be a
+plain executable invocation (no shell pipes; use `sh -c '...'` if you need them).
 
 ## Browse mode
 
@@ -109,7 +135,8 @@ debounce_ms = 1000                  # wait this long after the last event before
 ignore = ["_build", "deps", ".git", ".expert"] # names match any path component; paths with / match by prefix
 
 [output]
-# no options currently — controlled via CLI flags
+clear_screen = true   # clear the terminal between runs
+show_passing = false  # hide stdout/stderr from passing steps
 
 [summarize]
 enabled = false  # opt-in LLM failure summaries (not yet implemented)
@@ -176,7 +203,7 @@ Options:
 |---|---|
 | `-q` | Silence everything except failures |
 | *(default)* | Step list with pass/fail glyphs; expand output in browse mode |
-| `-v` | Also show stdout/stderr from passing steps (non-TTY / piped only) |
+| `-v` | Also stream stdout/stderr from passing steps (non-TTY/piped mode only) |
 | `-vv` | Also print internal debug events to stderr |
 
 ### Output modes
