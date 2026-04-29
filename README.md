@@ -79,7 +79,8 @@ A global fallback lives at `~/.config/baraddur/config.toml`.
 
 ### Examples
 
-#### Rust / Cargo
+<details>
+<summary>Rust / Cargo</summary>
 
 ```toml
 [watch]
@@ -98,7 +99,10 @@ cmd = "cargo test"
 parallel = false
 ```
 
-#### TypeScript / Node.js
+</details>
+
+<details>
+<summary>TypeScript / Node.js</summary>
 
 ```toml
 [watch]
@@ -129,7 +133,10 @@ parallel = true
 All three steps run concurrently as a single stage. Swap in `eslint`, `prettier`,
 or any other tool you prefer.
 
-#### Elixir / Mix
+</details>
+
+<details>
+<summary>Elixir / Mix</summary>
 
 ```toml
 [watch]
@@ -158,13 +165,18 @@ cmd = "mix test --failed"
 parallel = true
 ```
 
+</details>
+
 ### Full schema
+
+<details>
+<summary>Full schema reference</summary>
 
 ```toml
 [watch]
 extensions = ["ex", "exs", "heex"]  # file extensions to watch
 debounce_ms = 1000                  # wait this long after the last event before running
-ignore = ["_build", "deps", ".git", ".expert"] # names match any path component; paths with / match by prefix
+ignore = ["_build", "deps", ".git", ".baraddur"] # names match any path component; paths with / match by prefix
 
 [output]
 clear_screen = true   # clear the terminal between runs
@@ -188,6 +200,8 @@ name = "test"
 cmd  = "mix test --failed"
 parallel = true
 ```
+
+</details>
 
 ### Parallel steps
 
