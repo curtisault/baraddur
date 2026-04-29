@@ -42,12 +42,6 @@ and expand output inline:
 ## Install
 
 ```bash
-cargo install --path .
-```
-
-Or build and install a release binary directly:
-
-```bash
 just install
 # or manually:
 cargo build --release && cp ./target/release/baraddur ~/.local/bin/baraddur
@@ -56,24 +50,7 @@ cargo build --release && cp ./target/release/baraddur ~/.local/bin/baraddur
 ## Quick start
 
 Create a `.baraddur.toml` in your project root and run `baraddur` from anywhere
-inside that project:
-
-```toml
-[watch]
-extensions = ["rs"]
-debounce_ms = 500
-ignore = ["target", ".git"]
-
-[[steps]]
-name = "check"
-cmd = "cargo check"
-parallel = false
-
-[[steps]]
-name = "test"
-cmd = "cargo test"
-parallel = false
-```
+inside that project. See [Config examples](#examples) below for common stacks.
 
 baraddur runs the pipeline immediately on launch, then re-runs it on every file
 change. Steps are killed and restarted if a file changes mid-run.
@@ -106,10 +83,11 @@ A global fallback lives at `~/.config/baraddur/config.toml`.
 [watch]
 extensions = ["ex", "exs", "heex"]  # file extensions to watch
 debounce_ms = 1000                  # wait this long after the last event before running
-ignore = ["_build", "deps", ".git", ".expert"] # names match any path component; paths with / match by prefix
+ignore = ["_build", "deps", ".git", ".baraddur"] # names match any path component; paths with / match by prefix
 
 [output]
-# no options currently — controlled via CLI flags
+clear_screen = true   # clear the terminal between runs
+show_passing = false  # hide stdout/stderr from passing steps
 
 [summarize]
 enabled = false  # opt-in LLM failure summaries (not yet implemented)
@@ -129,6 +107,96 @@ name = "test"
 cmd  = "mix test --failed"
 parallel = true
 ```
+
+### Examples
+
+<details>
+<summary>Rust / Cargo</summary>
+
+```toml
+[watch]
+extensions = ["rs"]
+debounce_ms = 500
+ignore = ["target", ".git"]
+
+[[steps]]
+name = "check"
+cmd = "cargo check"
+parallel = false
+
+[[steps]]
+name = "test"
+cmd = "cargo test"
+parallel = false
+```
+
+</details>
+
+<details>
+<summary>TypeScript / Node.js</summary>
+
+```toml
+[watch]
+extensions = ["ts", "tsx"]
+debounce_ms = 500
+ignore = ["node_modules", "dist", ".baraddur"]
+
+[output]
+clear_screen = true
+show_passing = false
+
+[[steps]]
+name = "lint"
+cmd = "npx biome check ."
+parallel = true
+
+[[steps]]
+name = "type-check"
+cmd = "npx tsc --noEmit"
+parallel = true
+
+[[steps]]
+name = "unused-exports"
+cmd = "npx knip"
+parallel = true
+```
+
+All three steps run concurrently as a single stage. Swap in `eslint`, `prettier`,
+or any other tool you prefer.
+
+</details>
+
+<details>
+<summary>Elixir / Mix</summary>
+
+```toml
+[watch]
+extensions = ["ex", "exs", "heex"]
+debounce_ms = 500
+ignore = ["_build", "deps", ".git", ".expert"]
+
+[[steps]]
+name = "format"
+cmd = "mix format --check-formatted"
+parallel = false
+
+[[steps]]
+name = "compile"
+cmd = "mix compile --warnings-as-errors"
+parallel = false
+
+[[steps]]
+name = "credo"
+cmd = "mix credo"
+parallel = true
+
+[[steps]]
+name = "test"
+cmd = "mix test --failed"
+parallel = true
+```
+
+</details>
 
 ### Parallel steps
 
@@ -176,7 +244,7 @@ Options:
 |---|---|
 | `-q` | Silence everything except failures |
 | *(default)* | Step list with pass/fail glyphs; expand output in browse mode |
-| `-v` | Also show stdout/stderr from passing steps (non-TTY / piped only) |
+| `-v` | Also stream stdout/stderr from passing steps (non-TTY/piped mode only) |
 | `-vv` | Also print internal debug events to stderr |
 
 ### Output modes
