@@ -2,9 +2,16 @@
 name = "baraddur"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Project-agnostic file watcher that surfaces issues before CI"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/curtisault/baraddur"
+homepage = "https://github.com/curtisault/baraddur"
+documentation = "https://docs.rs/baraddur"
+readme = "README.md"
+keywords = ["file-watcher", "cli", "watch", "developer-tools", "ci"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = ["docs/", "barad-dur.svg", "CLAUDE.md", "AGENTS.md", ".github/"]
 
 [[bin]]
 name = "baraddur"
