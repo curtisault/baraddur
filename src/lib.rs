@@ -50,6 +50,16 @@ impl App {
         };
         let mut rx = watcher::start(wcfg)?;
 
+        // Single long-lived OS thread drains crossterm events into a channel.
+        // Per-iteration spawn_blocking readers leaked: their JoinHandles were
+        // dropped on file-change cancellation but the threads kept blocking
+        // inside event::read(), then stole the next keystroke and exited.
+        let mut key_rx = if dc.is_tty {
+            Some(spawn_key_reader())
+        } else {
+            None
+        };
+
         if dc.verbosity == output::Verbosity::Debug {
             eprintln!("[debug] watcher started, running initial pipeline");
         }
@@ -111,12 +121,16 @@ impl App {
             // In TTY mode, enter interactive browse mode so the user can
             // navigate steps and expand output with vim-style keybindings.
             if dc.is_tty {
+                let key_rx = key_rx
+                    .as_mut()
+                    .expect("key_rx initialized when dc.is_tty is true");
+
+                // Discard any keystrokes that queued up during the pipeline run.
+                while key_rx.try_recv().is_ok() {}
+
                 display.enter_browse_mode();
 
                 loop {
-                    let key_fut = next_key_event();
-                    tokio::pin!(key_fut);
-
                     tokio::select! {
                         biased;
 
@@ -146,15 +160,20 @@ impl App {
                             }
                         }
 
-                        maybe_key = &mut key_fut => {
-                            if let Some(key) = maybe_key {
-                                match display.handle_key(key) {
+                        maybe_key = key_rx.recv() => {
+                            match maybe_key {
+                                Some(key) => match display.handle_key(key) {
                                     BrowseAction::Noop => {}
                                     BrowseAction::Redraw => display.browse_redraw_if_active(),
                                     BrowseAction::Quit => {
                                         display.exit_browse_mode();
                                         return self.shutdown().await;
                                     }
+                                },
+                                None => {
+                                    display.exit_browse_mode();
+                                    eprintln!("baraddur: keyboard reader stopped unexpectedly. exiting.");
+                                    return Ok(());
                                 }
                             }
                         }
@@ -207,21 +226,30 @@ impl App {
     }
 }
 
-/// Reads the next keyboard event from stdin without blocking the async executor.
-/// Resize events, mouse events, and other non-key events are silently skipped.
-/// Returns `None` only on terminal read error.
-async fn next_key_event() -> Option<crossterm::event::KeyEvent> {
-    tokio::task::spawn_blocking(|| {
-        loop {
-            match crossterm::event::read() {
-                Ok(crossterm::event::Event::Key(k)) => return Some(k),
-                Ok(_) => continue,
-                Err(_) => return None,
+/// Spawns a dedicated OS thread that loops on `crossterm::event::read()` and
+/// forwards key events onto a channel. One reader per process — the channel
+/// outlives any single browse-mode session, so file-change cancellation no
+/// longer leaks blocked readers that steal subsequent keystrokes.
+///
+/// The thread exits when the receiver is dropped or `event::read()` errors.
+fn spawn_key_reader() -> tokio::sync::mpsc::Receiver<crossterm::event::KeyEvent> {
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    let _ = std::thread::Builder::new()
+        .name("baraddur-keys".into())
+        .spawn(move || {
+            loop {
+                match crossterm::event::read() {
+                    Ok(crossterm::event::Event::Key(k)) => {
+                        if tx.blocking_send(k).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(_) => return,
+                }
             }
-        }
-    })
-    .await
-    .unwrap_or(None)
+        });
+    rx
 }
 
 /// Writes all step output for the last run to `.baraddur/last-run.log`.
