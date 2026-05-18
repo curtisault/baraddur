@@ -1,0 +1,23 @@
+[watch]
+extensions = ["rs", "toml"]
+debounce_ms = 500
+ignore = ["target", ".git", ".baraddur", ".claude"]
+
+[output]
+clear_screen = true
+show_passing = false
+
+[[steps]]
+name = "fmt"
+cmd = "cargo fmt --check"
+parallel = false
+
+[[steps]]
+name = "clippy"
+cmd = "cargo clippy --all-targets -- -D warnings"
+parallel = true
+
+[[steps]]
+name = "test"
+cmd = "cargo test"
+parallel = true
