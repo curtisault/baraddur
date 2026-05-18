@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    name: ${{ matrix.task }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        task: [fmt, clippy, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-${{ matrix.task }}
+
+      - name: fmt-check
+        if: matrix.task == 'fmt'
+        run: cargo fmt --check
+
+      - name: clippy
+        if: matrix.task == 'clippy'
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: test
+        if: matrix.task == 'test'
+        run: cargo test --locked
