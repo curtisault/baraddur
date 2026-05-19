@@ -41,6 +41,33 @@ and expand output inline:
 
 ## Install
 
+### From crates.io
+
+```bash
+cargo install baraddur
+```
+
+### Pre-built binaries
+
+Download the tarball for your platform from the [latest release](https://github.com/curtisault/baraddur/releases/latest) and place `baraddur` somewhere on your `$PATH`. Supported targets:
+
+| Platform | Target triple |
+|---|---|
+| macOS (Apple Silicon) | `aarch64-apple-darwin` |
+| macOS (Intel) | `x86_64-apple-darwin` |
+| Linux (x86_64) | `x86_64-unknown-linux-gnu` |
+| Linux (aarch64) | `aarch64-unknown-linux-gnu` |
+
+Each tarball ships with `README.md`, `LICENSE-MIT`, and `LICENSE-APACHE` alongside the binary, and a `.sha256` checksum file is attached to the release.
+
+### Homebrew
+
+Coming soon — tap not yet published.
+
+### From source
+
+Requires Rust 1.85 or newer.
+
 ```bash
 just install
 # or manually:
@@ -279,14 +306,7 @@ to the watch root. Add it to your `.gitignore`:
 On screen, output longer than 50 lines is truncated to the first 25 and last 25
 lines with an elision marker pointing to the log file.
 
-## Project status
+## Future ideas
 
-| Phase | Status |
-|---|---|
-| Core watcher + sequential pipeline | ✓ done |
-| Config discovery, validation, error polish | ✓ done |
-| Parallel execution, mid-run cancel+restart | ✓ done |
-| Terminal polish (colors, spinner, verbosity) | ✓ done |
-| Browse mode (interactive post-run navigation) | ✓ done |
-| LLM failure summaries | planned |
-| Distribution (CI, release binaries, install script) | planned |
+- LLM failure summaries (pipe combined stdout/stderr to a configurable CLI for a short post-failure recap)
+- Homebrew tap
