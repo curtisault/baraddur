@@ -37,6 +37,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 [dev-dependencies]
 tempfile = "3"
 
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+
 [profile.release]
 opt-level = 3
 lto = "fat"
