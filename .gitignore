@@ -4,3 +4,4 @@
 # AI SLOP
 **/.serena
 /.envrc
+/.claude/scheduled_tasks.lock
