@@ -76,8 +76,14 @@ cargo build --release && cp ./target/release/baraddur ~/.local/bin/baraddur
 
 ## Quick start
 
-Create a `.baraddur.toml` in your project root and run `baraddur` from anywhere
-inside that project. See [Config examples](#examples) below for common stacks.
+Scaffold a starter config and run:
+
+```bash
+baraddur init   # writes .baraddur.toml in the current directory
+baraddur        # start watching
+```
+
+See [Config examples](#examples) below for common stacks.
 
 baraddur runs the pipeline immediately on launch, then re-runs it on every file
 change. Steps are killed and restarted if a file changes mid-run.
@@ -275,7 +281,10 @@ baraddur -c ./.baraddur.toml
 ## CLI flags
 
 ```
-baraddur [OPTIONS]
+baraddur [OPTIONS] [COMMAND]
+
+Commands:
+  init   Scaffold a starter .baraddur.toml in the current directory
 
 Options:
   -c, --config <FILE>     Config file (disables walk-up discovery)

@@ -1,4 +1,4 @@
-use clap::{ArgAction, Parser};
+use clap::{ArgAction, Parser, Subcommand};
 use std::io::IsTerminal as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -13,8 +13,11 @@ use baraddur::output::{DisplayConfig, Verbosity};
     about = "Project-agnostic file watcher that surfaces issues before CI"
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Config file path (disables walk-up discovery)
-    #[arg(short = 'c', long)]
+    #[arg(short = 'c', long, global = true)]
     config: Option<PathBuf>,
 
     /// Directory to watch [default: directory containing the discovered config]
@@ -38,6 +41,12 @@ struct Cli {
     quiet: bool,
 }
 
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Scaffold a starter `.baraddur.toml` in the current directory.
+    Init,
+}
+
 impl Cli {
     fn verbosity(&self) -> Verbosity {
         if self.quiet {
@@ -55,6 +64,10 @@ impl Cli {
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
+
+    if let Some(Command::Init) = cli.command {
+        return run_init();
+    }
 
     let loaded = match config::load(cli.config.as_deref()) {
         Ok(l) => l,
@@ -95,6 +108,26 @@ async fn main() -> ExitCode {
 
     match app.run().await {
         Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("baraddur: {e:#}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_init() -> ExitCode {
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("baraddur: getting current directory: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match config::init(&cwd) {
+        Ok(path) => {
+            println!("created {}", path.display());
+            ExitCode::SUCCESS
+        }
         Err(e) => {
             eprintln!("baraddur: {e:#}");
             ExitCode::from(1)

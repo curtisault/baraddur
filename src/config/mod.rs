@@ -8,6 +8,22 @@ pub use validate::{ValidationErrors, validate};
 use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
 
+/// Starter template written by `baraddur init`. Same content as the example
+/// in `not_found_error`, so users see one config shape across both UX paths.
+const STARTER_TEMPLATE: &str = "\
+# baraddur config — see https://github.com/curtisault/baraddur#config
+
+[watch]
+extensions = [\"rs\"]
+debounce_ms = 500
+ignore = [\"target\", \".git\", \".baraddur\"]
+
+[[steps]]
+name = \"check\"
+cmd = \"cargo check\"
+parallel = false
+";
+
 /// The result of a successful config load.
 #[derive(Debug)]
 pub struct Loaded {
@@ -91,6 +107,18 @@ fn load_from(path: &Path, source: ConfigSource) -> Result<Loaded> {
     })
 }
 
+/// Scaffolds a starter `.baraddur.toml` in `dir`. Refuses if a config already
+/// exists at that path. Returns the absolute path that was written.
+pub fn init(dir: &Path) -> Result<PathBuf> {
+    let path = dir.join(discovery::CONFIG_FILENAME);
+    if path.exists() {
+        anyhow::bail!("{} already exists", path.display());
+    }
+    std::fs::write(&path, STARTER_TEMPLATE)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
+}
+
 /// Renders UX state E1. Phrasing is stable — tests assert against it.
 fn not_found_error(searched: &[PathBuf], global: Option<&Path>) -> String {
     let mut msg = String::from("no .baraddur.toml found in this directory or any parent");
@@ -133,4 +161,31 @@ fn not_found_error(searched: &[PathBuf], global: Option<&Path>) -> String {
     }
 
     msg
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn init_writes_starter_config() {
+        let td = TempDir::new().unwrap();
+        let path = init(td.path()).unwrap();
+        assert!(path.exists());
+        assert_eq!(path.file_name().unwrap(), discovery::CONFIG_FILENAME);
+
+        // The written template must parse as a valid Config.
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let cfg: Config = toml::from_str(&contents).expect("starter template parses");
+        validate(&cfg).expect("starter template validates");
+    }
+
+    #[test]
+    fn init_refuses_to_overwrite() {
+        let td = TempDir::new().unwrap();
+        init(td.path()).unwrap();
+        let err = init(td.path()).unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+    }
 }
