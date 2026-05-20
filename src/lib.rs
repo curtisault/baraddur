@@ -4,6 +4,7 @@ pub mod pipeline;
 pub mod watcher;
 
 use anyhow::Result;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -105,7 +106,7 @@ impl App {
                     continue;
                 }
                 RunOutcome::Shutdown => {
-                    return self.shutdown().await;
+                    return self.shutdown();
                 }
                 RunOutcome::WatcherDied => {
                     eprintln!("baraddur: file watcher stopped unexpectedly. exiting.");
@@ -136,7 +137,7 @@ impl App {
 
                         _ = tokio::signal::ctrl_c() => {
                             display.exit_browse_mode();
-                            return self.shutdown().await;
+                            return self.shutdown();
                         }
 
                         maybe = rx.recv() => {
@@ -167,7 +168,7 @@ impl App {
                                     BrowseAction::Redraw => display.browse_redraw_if_active(),
                                     BrowseAction::Quit => {
                                         display.exit_browse_mode();
-                                        return self.shutdown().await;
+                                        return self.shutdown();
                                     }
                                 },
                                 None => {
@@ -186,7 +187,7 @@ impl App {
                 biased;
 
                 _ = tokio::signal::ctrl_c() => {
-                    return self.shutdown().await;
+                    return self.shutdown();
                 }
 
                 maybe = rx.recv() => {
@@ -212,7 +213,7 @@ impl App {
         }
     }
 
-    async fn shutdown(&self) -> Result<()> {
+    fn shutdown(&self) -> Result<()> {
         eprintln!("\nbaraddur: exiting...");
 
         // Double-tap handler: a second Ctrl+C force-exits immediately.
@@ -244,7 +245,7 @@ fn spawn_key_reader() -> tokio::sync::mpsc::Receiver<crossterm::event::KeyEvent>
                             return;
                         }
                     }
-                    Ok(_) => continue,
+                    Ok(_) => {}
                     Err(_) => return,
                 }
             }
@@ -262,11 +263,12 @@ fn write_run_log(root: &Path, results: &[StepResult]) {
 
     let mut content = String::new();
     for r in results {
-        content.push_str(&format!(
-            "═══ {} ({}) ═══\n",
+        let _ = writeln!(
+            content,
+            "═══ {} ({}) ═══",
             r.name,
             if r.success { "pass" } else { "FAIL" }
-        ));
+        );
         if !r.stdout.is_empty() {
             content.push_str(&r.stdout);
             if !r.stdout.ends_with('\n') {

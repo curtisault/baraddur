@@ -102,8 +102,8 @@ mod tests {
         WatchConfig {
             root: PathBuf::from("."),
             debounce: Duration::from_millis(1000),
-            extensions: exts.iter().map(|s| s.to_string()).collect(),
-            ignore: ignore.iter().map(|s| s.to_string()).collect(),
+            extensions: exts.iter().map(|s| (*s).into()).collect(),
+            ignore: ignore.iter().map(|s| (*s).into()).collect(),
         }
     }
 
@@ -151,8 +151,8 @@ mod tests {
         WatchConfig {
             root: PathBuf::from(root),
             debounce: Duration::from_millis(1000),
-            extensions: exts.iter().map(|s| s.to_string()).collect(),
-            ignore: ignore.iter().map(|s| s.to_string()).collect(),
+            extensions: exts.iter().map(|s| (*s).into()).collect(),
+            ignore: ignore.iter().map(|s| (*s).into()).collect(),
         }
     }
 
