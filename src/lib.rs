@@ -160,6 +160,7 @@ impl App {
                     // one if this run failed and the user has on_failure enabled.
                     if let Some(h) = hook_handle.take() {
                         h.abort();
+                        display.hook_finished();
                     }
                     if self.config.on_failure.enabled && results.iter().any(|r| !r.success) {
                         let cfg = self.config.on_failure.clone();
@@ -168,6 +169,7 @@ impl App {
                         hook_handle = Some(tokio::spawn(async move {
                             pipeline::run_hook(&cfg, &cwd, &combined).await
                         }));
+                        display.hook_started();
                     }
                 }
                 RunOutcome::FileChange(paths) => {
@@ -180,6 +182,7 @@ impl App {
                     }
                     if let Some(h) = hook_handle.take() {
                         h.abort();
+                        display.hook_finished();
                     }
                     let rel = rel_paths(&paths, &self.root);
                     display.run_cancelled();
@@ -190,6 +193,7 @@ impl App {
                 RunOutcome::Shutdown => {
                     if let Some(h) = hook_handle.take() {
                         h.abort();
+                        display.hook_finished();
                     }
                     return self.shutdown();
                 }
@@ -221,13 +225,13 @@ impl App {
                         biased;
 
                         _ = &mut stop => {
-                            if let Some(h) = hook_handle.take() { h.abort(); }
+                            if let Some(h) = hook_handle.take() { h.abort(); display.hook_finished(); }
                             display.exit_browse_mode();
                             return self.shutdown();
                         }
 
                         maybe = rx.recv() => {
-                            if let Some(h) = hook_handle.take() { h.abort(); }
+                            if let Some(h) = hook_handle.take() { h.abort(); display.hook_finished(); }
                             display.exit_browse_mode();
                             match maybe {
                                 Some(paths) => {
@@ -256,19 +260,19 @@ impl App {
                                     BrowseAction::Noop => {}
                                     BrowseAction::Redraw => display.browse_redraw_if_active(),
                                     BrowseAction::Quit => {
-                                        if let Some(h) = hook_handle.take() { h.abort(); }
+                                        if let Some(h) = hook_handle.take() { h.abort(); display.hook_finished(); }
                                         display.exit_browse_mode();
                                         return self.shutdown();
                                     }
                                     BrowseAction::Rerun => {
-                                        if let Some(h) = hook_handle.take() { h.abort(); }
+                                        if let Some(h) = hook_handle.take() { h.abort(); display.hook_finished(); }
                                         display.exit_browse_mode();
                                         trigger_paths = None;
                                         rerun_filter = None;
                                         continue 'main;
                                     }
                                     BrowseAction::RerunFailed => {
-                                        if let Some(h) = hook_handle.take() { h.abort(); }
+                                        if let Some(h) = hook_handle.take() { h.abort(); display.hook_finished(); }
                                         display.exit_browse_mode();
                                         trigger_paths = None;
                                         rerun_filter = last_failed_steps.clone();
@@ -288,8 +292,9 @@ impl App {
                         // stays in browse until a file change or `q`.
                         res = await_hook(&mut hook_handle), if hook_handle.is_some() => {
                             hook_handle = None;
-                            if let Ok(Ok(Some(text))) = res {
-                                display.hook_output(&text);
+                            match res {
+                                Ok(Ok(Some(text))) => display.hook_output(&text),
+                                _ => display.hook_finished(),
                             }
                         }
                     }
@@ -333,8 +338,9 @@ impl App {
 
                     res = await_hook(&mut hook_handle), if hook_handle.is_some() => {
                         hook_handle = None;
-                        if let Ok(Ok(Some(text))) = res {
-                            display.hook_output(&text);
+                        match res {
+                            Ok(Ok(Some(text))) => display.hook_output(&text),
+                            _ => display.hook_finished(),
                         }
                         // continue idle loop — wait for next event
                     }

@@ -96,4 +96,15 @@ pub trait Display: Send {
     /// main loop after the hook subprocess completes successfully.
     /// Default is a no-op.
     fn hook_output(&mut self, _text: &str) {}
+
+    /// A `[on_failure]` hook task has been spawned. Implementations should
+    /// show a "running" indicator to make the async work visible.
+    /// Default is a no-op.
+    fn hook_started(&mut self) {}
+
+    /// The hook task has settled (completed normally, timed out, exited
+    /// non-zero, or was aborted). Implementations should clear any "running"
+    /// indicator. Always called when the task exits, regardless of outcome.
+    /// Default is a no-op.
+    fn hook_finished(&mut self) {}
 }

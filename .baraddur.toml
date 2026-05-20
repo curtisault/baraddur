@@ -33,3 +33,14 @@ name = "toml-changed"
 cmd = "echo Changed TOML: {files}"
 parallel = true
 if_changed = ["**/*.toml"]
+
+# Demo: exercises the [on_failure] hook. To trigger, break a step (e.g. add
+# `let _x: u32 = "string";` to any .rs file → clippy fails). You should see:
+# 1. A dim "running on_failure hook…" line below the failure summary
+# 2. ~1 second later, the captured stdout (first 20 lines of combined failure
+#    output) replaces it. Delete this block when done.
+[on_failure]
+enabled = true
+cmd = "sh -c 'sleep 1; head -20'"
+prompt = "HØØK: First 20 lines of failure output:"
+timeout_secs = 10
