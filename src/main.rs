@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use clap::{ArgAction, Parser, Subcommand};
 use std::io::IsTerminal as _;
 use std::path::PathBuf;
