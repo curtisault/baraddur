@@ -286,6 +286,9 @@ impl Drop for TtyDisplay {
         }
         #[cfg(unix)]
         if let Some(t) = self.original_termios {
+            // SAFETY: `t` is a `libc::termios` previously read from STDIN
+            // via tcgetattr in `TtyDisplay::new`. STDIN_FILENO is a
+            // process-wide constant fd. tcsetattr only reads through &t.
             unsafe {
                 libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
             }
@@ -301,6 +304,10 @@ impl TtyDisplay {
         // We clear only ECHO/ECHOE and leave everything else (ISIG, OPOST, …)
         // untouched so that Ctrl+C still generates SIGINT and println! still
         // works normally.
+        // SAFETY: `libc::termios` is a C POD safe to zero-initialize, and
+        // tcgetattr populates every field before we read it. STDIN_FILENO is
+        // always a valid fd. If tcgetattr fails (e.g. stdin isn't a TTY) we
+        // short-circuit to None without touching the half-initialized struct.
         #[cfg(unix)]
         let original_termios = unsafe {
             let mut t: libc::termios = std::mem::zeroed();
@@ -371,6 +378,8 @@ impl TtyDisplay {
             // - ISIG:  breaks Ctrl+C because it no longer generates SIGINT
             // Re-enable both immediately after so the display and signal
             // handling continue to work correctly.
+            // SAFETY: same zero-init + tcgetattr-populates pattern as in
+            // `TtyDisplay::new`. We only modify `t` if tcgetattr succeeded.
             #[cfg(unix)]
             unsafe {
                 let mut t: libc::termios = std::mem::zeroed();
@@ -965,6 +974,9 @@ mod tests {
     static STDIN_LOCK: Mutex<()> = Mutex::new(());
 
     fn termios_of(fd: libc::c_int) -> libc::termios {
+        // SAFETY: `libc::termios` is a C POD safe to zero-init. tcgetattr
+        // populates every field; we assert success before reading `t`.
+        // Caller is responsible for passing a valid open fd.
         unsafe {
             let mut t: libc::termios = std::mem::zeroed();
             assert_eq!(
@@ -981,6 +993,9 @@ mod tests {
     fn open_pty() -> (libc::c_int, libc::c_int) {
         let mut master: libc::c_int = -1;
         let mut slave: libc::c_int = -1;
+        // SAFETY: `master` and `slave` are valid `&mut c_int` pointers
+        // backed by stack locals. The remaining three args are optional
+        // out-params and `null` is the documented "don't care" value.
         let ret = unsafe {
             libc::openpty(
                 &mut master,
@@ -1014,12 +1029,13 @@ mod tests {
         );
 
         // Redirect stdin to the pty slave so TtyDisplay sees a real TTY fd.
+        // SAFETY: STDIN_FILENO is always a valid fd in a unix process.
         let saved_stdin = unsafe { libc::dup(libc::STDIN_FILENO) };
         assert_ne!(saved_stdin, -1);
-        assert_eq!(
-            unsafe { libc::dup2(slave, libc::STDIN_FILENO) },
-            libc::STDIN_FILENO
-        );
+        // SAFETY: `slave` was just returned by openpty (asserted success);
+        // STDIN_FILENO is always valid.
+        let dup2_ret = unsafe { libc::dup2(slave, libc::STDIN_FILENO) };
+        assert_eq!(dup2_ret, libc::STDIN_FILENO);
 
         {
             let _display = TtyDisplay::new(Theme::new(false), Verbosity::Normal, false);
@@ -1042,6 +1058,9 @@ mod tests {
         );
 
         // Clean up.
+        // SAFETY: `saved_stdin`, `master`, and `slave` were obtained from
+        // earlier unsafe calls in this test and have not been closed.
+        // STDIN_FILENO is always valid.
         unsafe {
             libc::dup2(saved_stdin, libc::STDIN_FILENO);
             libc::close(saved_stdin);
