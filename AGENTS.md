@@ -33,6 +33,7 @@ src/
 - **Stage-based pipeline** (`src/pipeline/`): steps are grouped into stages by consecutive `parallel` flag. Sequential steps each get their own stage; consecutive parallel steps batch into one stage run via `JoinSet`. A failing stage skips all subsequent stages.
 - **Config** (`src/config/`): TOML deserialized with `deny_unknown_fields` on every struct. Adding a config field requires updating `schema.rs` *and* `validate.rs` together.
 - **Mid-run restart**: when a file change arrives while the pipeline is running, child processes are killed and the run restarts. Do not simplify this cancellation path away.
+- **on_failure hook** (`src/pipeline/hook.rs`): after a failing run, an optional user-configured command is spawned with the combined failed-step output on stdin. It runs asynchronously — the failure output is shown immediately, the hook output slots in when ready. The task is aborted (and its child killed via `kill_on_drop`) on file change or shutdown. Wired into `lib.rs::run_until` via `HookHandle` + `await_hook`.
 
 ## Invariants — Do Not Break
 
@@ -40,17 +41,6 @@ src/
 2. `deny_unknown_fields` on config structs — schema and validation must stay in sync.
 3. Mid-run file changes cancel and restart the pipeline.
 4. `just ci` must pass with zero warnings (clippy is `-D warnings`).
-5. LLM integration spawns an **external CLI binary** (`cmd = "claude"`), not a library. Keep it that way.
-
-## Phase Status
-
-| Phase | Status | Notes |
-|-------|--------|-------|
-| 1–5   | Done   | Watch, config, parallel execution, terminal polish, browse mode |
-| 6     | Planned | LLM failure summaries — `SummarizeConfig` is parsed in `src/config/schema.rs` but not yet executed |
-| 7     | Planned | Distribution: GitHub Actions CI, release binaries |
-
-**Phase 6 hook point:** after a stage fails in `src/pipeline/runner.rs`, pipe combined stdout/stderr to the command in `SummarizeConfig.cmd` via stdin.
 
 ## Testing
 
@@ -71,11 +61,11 @@ ignore = ["target", ".git"]
 clear_screen = true
 show_passing = false   # hide stdout from passing steps
 
-[summarize]            # Phase 6: parsed, not yet executed
+[on_failure]           # optional async post-failure hook
 enabled = false
-cmd = "claude"
-prompt = "Summarize failures in under 5 lines..."
-timeout_secs = 15
+cmd = ""               # receives combined failed output on stdin
+prompt = ""            # optional preamble prepended to stdin
+timeout_secs = 30
 
 [[steps]]
 name = "check"

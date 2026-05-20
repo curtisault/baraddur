@@ -84,4 +84,9 @@ pub trait Display: Send {
     /// Redraw the browse step list if browse mode is currently active.
     /// Default is a no-op (PlainDisplay).
     fn browse_redraw_if_active(&mut self) {}
+
+    /// Show output from the configured `[on_failure]` hook. Called from the
+    /// main loop after the hook subprocess completes successfully.
+    /// Default is a no-op.
+    fn hook_output(&mut self, _text: &str) {}
 }

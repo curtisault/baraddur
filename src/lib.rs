@@ -10,10 +10,16 @@ use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tokio::task::JoinHandle;
 
 use crate::output::style::{Theme, should_color};
 use crate::output::{BrowseAction, Display, DisplayConfig, PlainDisplay, TtyDisplay};
 use crate::pipeline::StepResult;
+
+/// Result of the spawned on_failure hook task. Outer Result is the join
+/// result; inner is `run_hook`'s return — `Some(text)` if the hook produced
+/// output, `None` if it was suppressed (timeout, non-zero exit, empty stdout).
+type HookHandle = JoinHandle<Result<Option<String>>>;
 
 pub struct App {
     pub config: config::Config,
@@ -83,6 +89,10 @@ impl App {
             eprintln!("[debug] watcher started, running initial pipeline");
         }
 
+        // In-flight on_failure hook task, set after a failing run and cleared
+        // when it completes, the user saves a file, or shutdown begins.
+        let mut hook_handle: Option<HookHandle> = None;
+
         'main: loop {
             let outcome = tokio::select! {
                 biased;
@@ -110,6 +120,20 @@ impl App {
                 RunOutcome::Completed(result) => {
                     let results = result?;
                     write_run_log(&self.root, &results);
+
+                    // Cancel any leftover hook from a prior run; spawn a new
+                    // one if this run failed and the user has on_failure enabled.
+                    if let Some(h) = hook_handle.take() {
+                        h.abort();
+                    }
+                    if self.config.on_failure.enabled && results.iter().any(|r| !r.success) {
+                        let cfg = self.config.on_failure.clone();
+                        let cwd = self.root.clone();
+                        let combined = pipeline::combine_failed_output(&results);
+                        hook_handle = Some(tokio::spawn(async move {
+                            pipeline::run_hook(&cfg, &cwd, &combined).await
+                        }));
+                    }
                 }
                 RunOutcome::FileChange(paths) => {
                     while rx.try_recv().is_ok() {}
@@ -119,11 +143,17 @@ impl App {
                             eprintln!("[debug]   triggered by: {}", p.display());
                         }
                     }
+                    if let Some(h) = hook_handle.take() {
+                        h.abort();
+                    }
                     display.run_cancelled();
                     display.set_trigger(&rel_paths(&paths, &self.root));
                     continue;
                 }
                 RunOutcome::Shutdown => {
+                    if let Some(h) = hook_handle.take() {
+                        h.abort();
+                    }
                     return self.shutdown();
                 }
                 RunOutcome::WatcherDied => {
@@ -154,11 +184,13 @@ impl App {
                         biased;
 
                         _ = &mut stop => {
+                            if let Some(h) = hook_handle.take() { h.abort(); }
                             display.exit_browse_mode();
                             return self.shutdown();
                         }
 
                         maybe = rx.recv() => {
+                            if let Some(h) = hook_handle.take() { h.abort(); }
                             display.exit_browse_mode();
                             match maybe {
                                 Some(paths) => {
@@ -185,6 +217,7 @@ impl App {
                                     BrowseAction::Noop => {}
                                     BrowseAction::Redraw => display.browse_redraw_if_active(),
                                     BrowseAction::Quit => {
+                                        if let Some(h) = hook_handle.take() { h.abort(); }
                                         display.exit_browse_mode();
                                         return self.shutdown();
                                     }
@@ -196,35 +229,59 @@ impl App {
                                 }
                             }
                         }
+
+                        // Hook task completed: forward its output (if any) into
+                        // the browse-mode footer. Never breaks the loop — user
+                        // stays in browse until a file change or `q`.
+                        res = await_hook(&mut hook_handle), if hook_handle.is_some() => {
+                            hook_handle = None;
+                            if let Ok(Ok(Some(text))) = res {
+                                display.hook_output(&text);
+                            }
+                        }
                     }
                 }
             }
 
             // Plain idle wait: non-TTY mode only (TTY mode loops inside browse above).
-            tokio::select! {
-                biased;
+            // Loops so that an in-flight hook completion doesn't fall through —
+            // we keep waiting for the next file-change or shutdown after it fires.
+            'idle: loop {
+                tokio::select! {
+                    biased;
 
-                _ = &mut stop => {
-                    return self.shutdown();
-                }
+                    _ = &mut stop => {
+                        if let Some(h) = hook_handle.take() { h.abort(); }
+                        return self.shutdown();
+                    }
 
-                maybe = rx.recv() => {
-                    match maybe {
-                        Some(paths) => {
-                            while rx.try_recv().is_ok() {}
-                            if dc.verbosity == output::Verbosity::Debug {
-                                eprintln!("[debug] file change — triggering pipeline");
-                                for p in &paths {
-                                    eprintln!("[debug]   triggered by: {}", p.display());
+                    maybe = rx.recv() => {
+                        if let Some(h) = hook_handle.take() { h.abort(); }
+                        match maybe {
+                            Some(paths) => {
+                                while rx.try_recv().is_ok() {}
+                                if dc.verbosity == output::Verbosity::Debug {
+                                    eprintln!("[debug] file change — triggering pipeline");
+                                    for p in &paths {
+                                        eprintln!("[debug]   triggered by: {}", p.display());
+                                    }
                                 }
+                                display.set_trigger(&rel_paths(&paths, &self.root));
+                                break 'idle; // fall through to loop top → rerun pipeline
                             }
-                            display.set_trigger(&rel_paths(&paths, &self.root));
-                            // fall through to loop top → rerun pipeline
+                            None => {
+                                eprintln!("baraddur: file watcher stopped unexpectedly. exiting.");
+                                return Ok(());
+                            }
                         }
-                        None => {
-                            eprintln!("baraddur: file watcher stopped unexpectedly. exiting.");
-                            return Ok(());
+                    }
+
+                    res = await_hook(&mut hook_handle), if hook_handle.is_some() => {
+                        hook_handle = None;
+                        if let Ok(Ok(Some(text))) = res {
+                            display.hook_output(&text);
                         }
+                        // continue idle loop — wait for next event
                     }
                 }
             }
@@ -242,6 +299,18 @@ impl App {
         });
 
         Ok(())
+    }
+}
+
+/// Awaits the on_failure hook task if one is in flight; otherwise pends
+/// forever. Used as a select! arm so the main loop can react to hook
+/// completion without blocking when no hook is active.
+async fn await_hook(
+    handle: &mut Option<HookHandle>,
+) -> std::result::Result<Result<Option<String>>, tokio::task::JoinError> {
+    match handle.as_mut() {
+        Some(h) => h.await,
+        None => std::future::pending().await,
     }
 }
 

@@ -9,7 +9,7 @@ pub struct Config {
     pub output: OutputConfig,
 
     #[serde(default)]
-    pub summarize: SummarizeConfig,
+    pub on_failure: OnFailureConfig,
 
     #[serde(default)]
     pub steps: Vec<Step>,
@@ -54,48 +54,39 @@ fn default_true() -> bool {
     true
 }
 
-/// Reserved for Phase 5. Parsed and stored, but not consumed anywhere yet.
-/// Defining it now means `deny_unknown_fields` on `Config` doesn't reject
-/// users who add `[summarize]` early.
-#[derive(Debug, Deserialize)]
+/// Post-failure hook. When `enabled` and any step in a completed run fails,
+/// `cmd` is spawned with the combined stdout/stderr of failed steps on stdin
+/// (optionally preceded by `prompt`). Its stdout is shown below the failure
+/// summary. Cancelled on file change or shutdown.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SummarizeConfig {
+pub struct OnFailureConfig {
     #[serde(default)]
     pub enabled: bool,
 
-    #[serde(default = "default_summarize_cmd")]
+    #[serde(default)]
     pub cmd: String,
 
-    #[serde(default = "default_summarize_prompt")]
+    #[serde(default)]
     pub prompt: String,
 
-    #[serde(default = "default_summarize_timeout")]
+    #[serde(default = "default_on_failure_timeout")]
     pub timeout_secs: u64,
 }
 
-impl Default for SummarizeConfig {
+impl Default for OnFailureConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            cmd: default_summarize_cmd(),
-            prompt: default_summarize_prompt(),
-            timeout_secs: default_summarize_timeout(),
+            cmd: String::new(),
+            prompt: String::new(),
+            timeout_secs: default_on_failure_timeout(),
         }
     }
 }
 
-fn default_summarize_cmd() -> String {
-    "claude".into()
-}
-
-fn default_summarize_prompt() -> String {
-    "Summarize these check failures in under 5 lines. Focus on root cause \
-     and cite file:line where possible."
-        .into()
-}
-
-fn default_summarize_timeout() -> u64 {
-    15
+fn default_on_failure_timeout() -> u64 {
+    30
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -192,23 +183,40 @@ mod tests {
     }
 
     #[test]
-    fn accepts_summarize_table() {
+    fn parses_on_failure_table() {
         let src = r#"
             [watch]
             extensions = ["rs"]
 
-            [summarize]
+            [on_failure]
             enabled = true
-            cmd = "claude"
-            timeout_secs = 30
+            cmd = "claude -p"
+            prompt = "summarize"
+            timeout_secs = 45
 
             [[steps]]
             name = "c"
             cmd = "true"
         "#;
         let cfg: Config = toml::from_str(src).unwrap();
-        assert!(cfg.summarize.enabled);
-        assert_eq!(cfg.summarize.timeout_secs, 30);
-        assert!(cfg.summarize.prompt.contains("Summarize"));
+        assert!(cfg.on_failure.enabled);
+        assert_eq!(cfg.on_failure.cmd, "claude -p");
+        assert_eq!(cfg.on_failure.prompt, "summarize");
+        assert_eq!(cfg.on_failure.timeout_secs, 45);
+    }
+
+    #[test]
+    fn on_failure_defaults_disabled() {
+        let src = r#"
+            [watch]
+            extensions = ["rs"]
+            [[steps]]
+            name = "c"
+            cmd = "true"
+        "#;
+        let cfg: Config = toml::from_str(src).unwrap();
+        assert!(!cfg.on_failure.enabled);
+        assert!(cfg.on_failure.cmd.is_empty());
+        assert_eq!(cfg.on_failure.timeout_secs, 30);
     }
 }

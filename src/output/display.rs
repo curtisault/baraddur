@@ -254,6 +254,18 @@ impl Display for PlainDisplay {
 
         let _ = std::io::stdout().flush();
     }
+
+    fn hook_output(&mut self, text: &str) {
+        if self.verbosity == Verbosity::Quiet {
+            return;
+        }
+        let ts = timestamp();
+        println!("[{ts}] --- on_failure ---");
+        for line in text.lines() {
+            println!("  {line}");
+        }
+        let _ = std::io::stdout().flush();
+    }
 }
 
 // ── TTY display (full-block redraw) ─────────────────────────────────────────
@@ -317,6 +329,9 @@ pub struct TtyDisplay {
     /// Terminal row offset for browse-mode viewport scrolling.
     /// Ensures the cursor step is always visible even when output overflows the screen.
     browse_scroll: usize,
+    /// Captured output from the `[on_failure]` hook for the current run, if any.
+    /// Rendered as a dim block between the run summary and the help bar.
+    hook_output_text: String,
 }
 
 impl Drop for TtyDisplay {
@@ -368,6 +383,7 @@ impl TtyDisplay {
             run_start: None,
             run_summary: String::new(),
             browse_scroll: 0,
+            hook_output_text: String::new(),
         }
     }
 
@@ -610,6 +626,16 @@ impl TtyDisplay {
                 all_lines.push((String::new(), 1));
                 cumulative += 2;
             }
+            if !self.hook_output_text.is_empty() {
+                for line in self.hook_output_text.lines() {
+                    let styled = format!("  {}", self.theme.dim(line));
+                    let r = Self::visual_rows_for(&styled, width) as usize;
+                    all_lines.push((styled, r));
+                    cumulative += r;
+                }
+                all_lines.push((String::new(), 1));
+                cumulative += 1;
+            }
             let help = "  j/k ↑/↓  navigate · Enter/o  toggle output · O  expand all · q  quit";
             all_lines.push((format!("{}", self.theme.dim(help)), 1));
             cumulative += 2;
@@ -758,6 +784,7 @@ impl Display for TtyDisplay {
         self.browse_active = false;
         self.last_key = None;
         self.browse_scroll = 0;
+        self.hook_output_text.clear();
 
         if self.verbosity == Verbosity::Quiet {
             return;
@@ -911,6 +938,13 @@ impl Display for TtyDisplay {
     }
 
     fn browse_redraw_if_active(&mut self) {
+        if self.browse_active {
+            self.browse_redraw();
+        }
+    }
+
+    fn hook_output(&mut self, text: &str) {
+        self.hook_output_text = text.to_string();
         if self.browse_active {
             self.browse_redraw();
         }

@@ -126,35 +126,6 @@ extensions = ["rs"]
     assert!(msg.contains("no steps"), "unexpected error: {msg}");
 }
 
-// ── Forward compatibility: [summarize] table ─────────────────────────────────
-
-#[test]
-fn summarize_table_is_accepted() {
-    let td = TempDir::new().unwrap();
-    let path = td.path().join(".baraddur.toml");
-    fs::write(
-        &path,
-        r#"
-[watch]
-extensions = ["rs"]
-
-[summarize]
-enabled = true
-cmd = "claude -p"
-timeout_secs = 30
-
-[[steps]]
-name = "check"
-cmd = "cargo check"
-"#,
-    )
-    .unwrap();
-
-    let loaded = config::load(Some(&path)).unwrap();
-    assert!(loaded.config.summarize.enabled);
-    assert_eq!(loaded.config.summarize.timeout_secs, 30);
-}
-
 // ── Discovery: walk-up via pure function (avoids cwd mutation) ───────────────
 
 #[test]

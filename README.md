@@ -122,8 +122,11 @@ ignore = ["_build", "deps", ".git", ".baraddur"] # names match any path componen
 clear_screen = true   # clear the terminal between runs
 show_passing = false  # hide stdout/stderr from passing steps
 
-[summarize]
-enabled = false  # opt-in LLM failure summaries (not yet implemented)
+[on_failure]            # optional post-failure hook
+enabled = false         # off by default; opt in per-project
+cmd = ""                # any command; receives combined failed output on stdin
+prompt = ""             # optional preamble prepended to stdin before the output
+timeout_secs = 30       # killed if it runs longer
 
 [[steps]]
 name = "format"
@@ -255,6 +258,36 @@ features like pipes, `&&`, and glob expansion are not supported. For those, use
 cmd = "sh -c 'mix compile 2>&1 | head -50'"
 ```
 
+### Post-failure hook
+
+When `[on_failure].enabled = true` and any step in a completed run fails, the
+configured `cmd` is spawned with the combined stdout+stderr of failing steps on
+stdin. `prompt` (if non-empty) is prepended as a preamble. The captured stdout
+is shown below the failure summary; non-zero exits, empty stdout, and timeouts
+are silently suppressed (with a stderr diagnostic).
+
+The hook runs asynchronously — your failure output is shown immediately and the
+hook output slots in when ready. A file change cancels the in-flight hook and
+kills the subprocess.
+
+Examples:
+
+```toml
+# Pipe the failure output through an LLM CLI for a short summary.
+[on_failure]
+enabled = true
+cmd = "claude -p"
+prompt = "Summarize these failures in under 5 lines. Cite file:line where possible."
+timeout_secs = 60
+```
+
+```toml
+# Just grab the first few error lines — no LLM needed.
+[on_failure]
+enabled = true
+cmd = "sh -c 'grep -E \"(FAIL|panic|error)\" | head -5'"
+```
+
 ## Security
 
 `.baraddur.toml` is **executable trust**: every `cmd` you list runs as your user
@@ -340,5 +373,4 @@ lines with an elision marker pointing to the log file.
 
 ## Future ideas
 
-- LLM failure summaries (pipe combined stdout/stderr to a configurable CLI for a short post-failure recap)
 - Homebrew tap

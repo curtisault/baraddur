@@ -2,7 +2,7 @@ pub mod discovery;
 pub mod schema;
 pub mod validate;
 
-pub use schema::{Config, OutputConfig, Step, SummarizeConfig, WatchConfig};
+pub use schema::{Config, OnFailureConfig, OutputConfig, Step, WatchConfig};
 pub use validate::{ValidationErrors, validate};
 
 use anyhow::{Context, Result, anyhow};
@@ -17,6 +17,16 @@ const STARTER_TEMPLATE: &str = "\
 extensions = [\"rs\"]
 debounce_ms = 500
 ignore = [\"target\", \".git\", \".baraddur\"]
+
+# [output]
+# clear_screen = true    # clear the terminal between runs
+# show_passing = false   # hide stdout/stderr from passing steps
+
+# [on_failure]            # optional: run a command after a failing run
+# enabled = false         # set true to activate
+# cmd = \"\"                # receives combined failed output on stdin
+# prompt = \"\"             # optional preamble prepended to stdin
+# timeout_secs = 30
 
 [[steps]]
 name = \"check\"
