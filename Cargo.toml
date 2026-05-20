@@ -26,7 +26,7 @@ notify-debouncer-mini = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "signal", "time"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1"
 shell-words = "1"
 dirs = "6"
 anyhow = "1"
