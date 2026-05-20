@@ -28,6 +28,13 @@ pub enum BrowseAction {
     Redraw,
     /// User pressed `q`; caller should exit browse mode and shut down the app.
     Quit,
+    /// User pressed `r`; caller should exit browse mode and rerun the full
+    /// pipeline (equivalent to the initial run — no trigger, no step filter).
+    Rerun,
+    /// User pressed `f`; caller should exit browse mode and rerun only the
+    /// steps that failed in the previous run. Display returns this only if
+    /// at least one step in the current view was marked Failed.
+    RerunFailed,
 }
 
 /// Sink for pipeline lifecycle events.

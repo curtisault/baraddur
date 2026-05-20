@@ -40,6 +40,11 @@ impl App {
 
     /// Runs the watch loop until either `stop` resolves or the watcher dies.
     /// Exposed so tests can drive the loop without sending SIGINT to the test runner.
+    // `last_failed_steps` is initialized to None as a placeholder; the first
+    // read only happens after at least one Completed has overwritten it, so
+    // the initial None is correctly diagnosed as unused. The placeholder is
+    // required for control-flow init.
+    #[allow(unused_assignments)]
     pub async fn run_until<F>(self, stop: F) -> Result<()>
     where
         F: Future<Output = ()>,
@@ -98,6 +103,17 @@ impl App {
         // the next `run_pipeline` invocation for path-based step filtering.
         let mut trigger_paths: Option<Vec<PathBuf>> = None;
 
+        // Names of steps that failed in the most recent completed run.
+        // Captured on `Completed`; consumed by the browse-mode `f` key, which
+        // narrows the next run to just these steps via `rerun_filter`. `None`
+        // until at least one run has completed.
+        let mut last_failed_steps: Option<Vec<String>> = None;
+
+        // Name filter for the next pipeline run. `Some(names)` runs only
+        // matching steps (browse-mode `f`); `None` runs everything that
+        // path-filtering left. Reset to `None` after each run completes.
+        let mut rerun_filter: Option<Vec<String>> = None;
+
         'main: loop {
             let outcome = tokio::select! {
                 biased;
@@ -117,6 +133,7 @@ impl App {
                     display.as_mut(),
                     spinner_interval,
                     trigger_paths.as_deref(),
+                    rerun_filter.as_deref(),
                 ) => RunOutcome::Completed(result),
             };
 
@@ -126,6 +143,18 @@ impl App {
                 RunOutcome::Completed(result) => {
                     let results = result?;
                     write_run_log(&self.root, &results);
+
+                    // Remember which steps failed so the browse-mode `f` key
+                    // can rerun them; reset the filter so the next iteration
+                    // doesn't accidentally re-apply it.
+                    last_failed_steps = Some(
+                        results
+                            .iter()
+                            .filter(|r| !r.success)
+                            .map(|r| r.name.clone())
+                            .collect(),
+                    );
+                    rerun_filter = None;
 
                     // Cancel any leftover hook from a prior run; spawn a new
                     // one if this run failed and the user has on_failure enabled.
@@ -230,6 +259,20 @@ impl App {
                                         if let Some(h) = hook_handle.take() { h.abort(); }
                                         display.exit_browse_mode();
                                         return self.shutdown();
+                                    }
+                                    BrowseAction::Rerun => {
+                                        if let Some(h) = hook_handle.take() { h.abort(); }
+                                        display.exit_browse_mode();
+                                        trigger_paths = None;
+                                        rerun_filter = None;
+                                        continue 'main;
+                                    }
+                                    BrowseAction::RerunFailed => {
+                                        if let Some(h) = hook_handle.take() { h.abort(); }
+                                        display.exit_browse_mode();
+                                        trigger_paths = None;
+                                        rerun_filter = last_failed_steps.clone();
+                                        continue 'main;
                                     }
                                 },
                                 None => {

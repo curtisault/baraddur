@@ -100,6 +100,8 @@ After each run, baraddur enters an interactive browse mode:
 | `G` | jump to last step |
 | `Enter` / `o` | toggle output for selected step |
 | `O` | expand all / collapse all |
+| `r` | rerun the full pipeline |
+| `f` | rerun only steps that failed last run (no-op if none failed) |
 | `q` | quit baraddur |
 
 Failing steps start with their output expanded. Save a file to exit browse mode

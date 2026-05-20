@@ -332,6 +332,10 @@ pub struct TtyDisplay {
     /// Captured output from the `[on_failure]` hook for the current run, if any.
     /// Rendered as a dim block between the run summary and the help bar.
     hook_output_text: String,
+    /// One-shot status message shown below the help bar (e.g., "no failures
+    /// to rerun" when the user presses `f` with no failed steps). Cleared at
+    /// the start of any recognized recognized key press and on `run_started`.
+    transient_message: Option<String>,
 }
 
 impl Drop for TtyDisplay {
@@ -384,6 +388,7 @@ impl TtyDisplay {
             run_summary: String::new(),
             browse_scroll: 0,
             hook_output_text: String::new(),
+            transient_message: None,
         }
     }
 
@@ -640,9 +645,16 @@ impl TtyDisplay {
                 all_lines.push((String::new(), 1));
                 cumulative += 1;
             }
-            let help = "  j/k ↑/↓  navigate · Enter/o  toggle output · O  expand all · q  quit";
+            let help = "  j/k ↑/↓  nav · Enter/o  toggle · O  expand all · r  rerun · f  rerun failed · q  quit";
             all_lines.push((format!("{}", self.theme.dim(help)), 1));
             cumulative += 2;
+
+            if let Some(msg) = &self.transient_message {
+                let line = format!("  {}", self.theme.yellow(msg));
+                let r = Self::visual_rows_for(&line, width) as usize;
+                all_lines.push((line, r));
+                cumulative += r;
+            }
         }
 
         // ── Adjust scroll so cursor step stays in viewport ───────────────
@@ -789,6 +801,7 @@ impl Display for TtyDisplay {
         self.last_key = None;
         self.browse_scroll = 0;
         self.hook_output_text.clear();
+        self.transient_message = None;
 
         if self.verbosity == Verbosity::Quiet {
             return;
@@ -965,7 +978,13 @@ impl Display for TtyDisplay {
             };
         }
 
-        match key.code {
+        // Any recognized key dismisses a prior transient message. The 'f'-no-
+        // failures arm re-sets it below. If we cleared a visible message but
+        // the resulting action is Noop, promote to Redraw so the message
+        // actually disappears from the screen.
+        let had_message = self.transient_message.take().is_some();
+
+        let action = match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
                 self.cursor = (self.cursor + 1).min(n - 1);
                 self.last_key = None;
@@ -1004,12 +1023,39 @@ impl Display for TtyDisplay {
                 self.last_key = None;
                 BrowseAction::Redraw
             }
+            KeyCode::Char('r') => {
+                self.last_key = None;
+                BrowseAction::Rerun
+            }
+            KeyCode::Char('f') => {
+                self.last_key = None;
+                // Only meaningful if there were failures to retry. Otherwise
+                // surface a one-shot message so the user knows the key was
+                // received but had nothing to act on.
+                if self
+                    .statuses
+                    .iter()
+                    .any(|s| matches!(s, StepStatus::Failed(..)))
+                {
+                    BrowseAction::RerunFailed
+                } else {
+                    self.transient_message = Some("no failures to re-run".into());
+                    BrowseAction::Redraw
+                }
+            }
             KeyCode::Char('q') => BrowseAction::Quit,
             _ => {
                 // Any unrecognized key clears the pending `g` chord.
                 self.last_key = None;
                 BrowseAction::Noop
             }
+        };
+
+        // Hide a just-cleared message even when no other state changed.
+        if matches!(action, BrowseAction::Noop) && had_message {
+            BrowseAction::Redraw
+        } else {
+            action
         }
     }
 }

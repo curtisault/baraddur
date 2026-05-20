@@ -19,6 +19,10 @@ use crate::output::Display;
 /// `trigger` — relative paths of files that triggered this run. `None` for
 /// the initial run; `Some(&[])` is treated like `Some(&paths)` with empty.
 ///
+/// `only_steps` — when `Some`, narrows the final step list to entries whose
+/// `name` appears in the slice. Applied after path-based filtering. Used by
+/// the browse-mode "rerun failed" key.
+///
 /// Returns all `StepResult`s for steps that actually ran (not skipped).
 pub async fn run_pipeline(
     config: &Config,
@@ -26,8 +30,13 @@ pub async fn run_pipeline(
     display: &mut dyn Display,
     spinner_interval: Option<Duration>,
     trigger: Option<&[PathBuf]>,
+    only_steps: Option<&[String]>,
 ) -> Result<Vec<StepResult>> {
-    let active_steps = filter_and_template(&config.steps, trigger)?;
+    let mut active_steps = filter_and_template(&config.steps, trigger)?;
+
+    if let Some(names) = only_steps {
+        active_steps.retain(|s| names.iter().any(|n| n == &s.name));
+    }
 
     let step_names: Vec<String> = active_steps.iter().map(|s| s.name.clone()).collect();
     display.run_started(&step_names);
