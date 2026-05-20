@@ -76,8 +76,14 @@ cargo build --release && cp ./target/release/baraddur ~/.local/bin/baraddur
 
 ## Quick start
 
-Create a `.baraddur.toml` in your project root and run `baraddur` from anywhere
-inside that project. See [Config examples](#examples) below for common stacks.
+Scaffold a starter config and run:
+
+```bash
+baraddur init   # writes .baraddur.toml in the current directory
+baraddur        # start watching
+```
+
+See [Config examples](#examples) below for common stacks.
 
 baraddur runs the pipeline immediately on launch, then re-runs it on every file
 change. Steps are killed and restarted if a file changes mid-run.
@@ -249,10 +255,36 @@ features like pipes, `&&`, and glob expansion are not supported. For those, use
 cmd = "sh -c 'mix compile 2>&1 | head -50'"
 ```
 
+## Security
+
+`.baraddur.toml` is **executable trust**: every `cmd` you list runs as your user
+on every file change. Treat the file the same way you'd treat a `Makefile`, a
+`justfile`, or a shell script — review it before running baraddur in a
+directory you don't fully control.
+
+Two specifics worth knowing:
+
+- **Walk-up discovery.** Like `git` and `.gitignore`, baraddur searches upward
+  from `cwd` for a `.baraddur.toml`. A config dropped in any ancestor directory
+  will be picked up automatically. After a fresh `git clone` of an unfamiliar
+  project, `cat .baraddur.toml` before running.
+- **Banner confirms which file loaded.** On every start, baraddur prints the
+  resolved config path. If it points somewhere you didn't expect, exit and
+  investigate.
+
+To pin to a specific file and disable walk-up discovery, pass `-c`:
+
+```bash
+baraddur -c ./.baraddur.toml
+```
+
 ## CLI flags
 
 ```
-baraddur [OPTIONS]
+baraddur [OPTIONS] [COMMAND]
+
+Commands:
+  init   Scaffold a starter .baraddur.toml in the current directory
 
 Options:
   -c, --config <FILE>     Config file (disables walk-up discovery)

@@ -1,9 +1,13 @@
+#![forbid(unsafe_code)]
+
 pub mod config;
 pub mod output;
 pub mod pipeline;
 pub mod watcher;
 
 use anyhow::Result;
+use std::fmt::Write as _;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -19,7 +23,22 @@ pub struct App {
 }
 
 impl App {
+    /// Convenience wrapper that uses Ctrl+C as the shutdown signal.
+    /// Production entry point.
     pub async fn run(self) -> Result<()> {
+        let stop = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+        self.run_until(stop).await
+    }
+
+    /// Runs the watch loop until either `stop` resolves or the watcher dies.
+    /// Exposed so tests can drive the loop without sending SIGINT to the test runner.
+    pub async fn run_until<F>(self, stop: F) -> Result<()>
+    where
+        F: Future<Output = ()>,
+    {
+        tokio::pin!(stop);
         let dc = &self.display_config;
         let color = should_color(dc.is_tty);
 
@@ -68,7 +87,7 @@ impl App {
             let outcome = tokio::select! {
                 biased;
 
-                _ = tokio::signal::ctrl_c() => RunOutcome::Shutdown,
+                _ = &mut stop => RunOutcome::Shutdown,
 
                 maybe = rx.recv() => {
                     match maybe {
@@ -105,7 +124,7 @@ impl App {
                     continue;
                 }
                 RunOutcome::Shutdown => {
-                    return self.shutdown().await;
+                    return self.shutdown();
                 }
                 RunOutcome::WatcherDied => {
                     eprintln!("baraddur: file watcher stopped unexpectedly. exiting.");
@@ -134,9 +153,9 @@ impl App {
                     tokio::select! {
                         biased;
 
-                        _ = tokio::signal::ctrl_c() => {
+                        _ = &mut stop => {
                             display.exit_browse_mode();
-                            return self.shutdown().await;
+                            return self.shutdown();
                         }
 
                         maybe = rx.recv() => {
@@ -167,7 +186,7 @@ impl App {
                                     BrowseAction::Redraw => display.browse_redraw_if_active(),
                                     BrowseAction::Quit => {
                                         display.exit_browse_mode();
-                                        return self.shutdown().await;
+                                        return self.shutdown();
                                     }
                                 },
                                 None => {
@@ -185,8 +204,8 @@ impl App {
             tokio::select! {
                 biased;
 
-                _ = tokio::signal::ctrl_c() => {
-                    return self.shutdown().await;
+                _ = &mut stop => {
+                    return self.shutdown();
                 }
 
                 maybe = rx.recv() => {
@@ -212,7 +231,7 @@ impl App {
         }
     }
 
-    async fn shutdown(&self) -> Result<()> {
+    fn shutdown(&self) -> Result<()> {
         eprintln!("\nbaraddur: exiting...");
 
         // Double-tap handler: a second Ctrl+C force-exits immediately.
@@ -244,7 +263,7 @@ fn spawn_key_reader() -> tokio::sync::mpsc::Receiver<crossterm::event::KeyEvent>
                             return;
                         }
                     }
-                    Ok(_) => continue,
+                    Ok(_) => {}
                     Err(_) => return,
                 }
             }
@@ -262,11 +281,12 @@ fn write_run_log(root: &Path, results: &[StepResult]) {
 
     let mut content = String::new();
     for r in results {
-        content.push_str(&format!(
-            "═══ {} ({}) ═══\n",
+        let _ = writeln!(
+            content,
+            "═══ {} ({}) ═══",
             r.name,
             if r.success { "pass" } else { "FAIL" }
-        ));
+        );
         if !r.stdout.is_empty() {
             content.push_str(&r.stdout);
             if !r.stdout.ends_with('\n') {

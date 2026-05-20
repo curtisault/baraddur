@@ -12,6 +12,47 @@ use super::style::{Theme, visible_len};
 use super::{BrowseAction, Display, Verbosity};
 use crate::pipeline::StepResult;
 
+#[cfg(unix)]
+mod terminal_io {
+    //! Safe wrappers around the termios syscalls we need.
+    //!
+    //! Factored out of `TtyDisplay` so tests can target these helpers directly
+    //! against a pty slave fd, without redirecting the process-wide stdin.
+    use rustix::termios::{
+        LocalModes, OptionalActions, OutputModes, Termios, tcgetattr, tcsetattr,
+    };
+    use std::os::fd::AsFd;
+
+    /// Reads termios from `fd`, clears `ECHO`/`ECHOE`, writes back. Returns
+    /// the pre-modification termios so the caller can restore later. Returns
+    /// `None` if `fd` isn't a tty (tcgetattr/tcsetattr failed).
+    pub fn suppress_echo<F: AsFd>(fd: F) -> Option<Termios> {
+        let fd = fd.as_fd();
+        let mut t = tcgetattr(fd).ok()?;
+        let backup = t.clone();
+        t.local_modes.remove(LocalModes::ECHO | LocalModes::ECHOE);
+        tcsetattr(fd, OptionalActions::Now, &t).ok()?;
+        Some(backup)
+    }
+
+    /// Re-enables `OPOST` and `ISIG` on `fd`. Called after crossterm's
+    /// `enable_raw_mode` so that `println!` still emits `\r` and Ctrl+C
+    /// still raises `SIGINT`. Silent on error.
+    pub fn restore_signals_and_output<F: AsFd>(fd: F) {
+        let fd = fd.as_fd();
+        if let Ok(mut t) = tcgetattr(fd) {
+            t.output_modes.insert(OutputModes::OPOST);
+            t.local_modes.insert(LocalModes::ISIG);
+            let _ = tcsetattr(fd, OptionalActions::Now, &t);
+        }
+    }
+
+    /// Restores `fd`'s termios to a previously saved snapshot. Silent on error.
+    pub fn restore<F: AsFd>(fd: F, t: &Termios) {
+        let _ = tcsetattr(fd, OptionalActions::Now, t);
+    }
+}
+
 // ── Shared helpers ───────────────────────────────────────────────────────────
 
 fn timestamp() -> String {
@@ -246,7 +287,7 @@ pub struct TtyDisplay {
     /// Suppressing echo prevents typed characters from corrupting the redrawn
     /// step-status block while a pipeline is running.
     #[cfg(unix)]
-    original_termios: Option<libc::termios>,
+    original_termios: Option<rustix::termios::Termios>,
     // ── Browse mode state ────────────────────────────────────────────────────
     /// Pre-formatted output per step, captured in `run_finished`.
     step_outputs: Vec<String>,
@@ -285,10 +326,8 @@ impl Drop for TtyDisplay {
             let _ = execute!(std::io::stdout(), cursor::Show);
         }
         #[cfg(unix)]
-        if let Some(t) = self.original_termios {
-            unsafe {
-                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
-            }
+        if let Some(t) = &self.original_termios {
+            terminal_io::restore(std::io::stdin(), t);
         }
         // Non-unix: crossterm disable_raw_mode above is sufficient.
     }
@@ -302,17 +341,7 @@ impl TtyDisplay {
         // untouched so that Ctrl+C still generates SIGINT and println! still
         // works normally.
         #[cfg(unix)]
-        let original_termios = unsafe {
-            let mut t: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(libc::STDIN_FILENO, &mut t) == 0 {
-                let backup = t;
-                t.c_lflag &= !(libc::ECHO | libc::ECHOE);
-                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
-                Some(backup)
-            } else {
-                None
-            }
-        };
+        let original_termios = terminal_io::suppress_echo(std::io::stdin());
 
         Self {
             theme,
@@ -372,14 +401,7 @@ impl TtyDisplay {
             // Re-enable both immediately after so the display and signal
             // handling continue to work correctly.
             #[cfg(unix)]
-            unsafe {
-                let mut t: libc::termios = std::mem::zeroed();
-                if libc::tcgetattr(libc::STDIN_FILENO, &mut t) == 0 {
-                    t.c_oflag |= libc::OPOST;
-                    t.c_lflag |= libc::ISIG;
-                    libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
-                }
-            }
+            terminal_io::restore_signals_and_output(std::io::stdin());
         }
     }
 
@@ -959,94 +981,70 @@ impl Display for TtyDisplay {
 #[cfg(unix)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use rustix::termios::{LocalModes, OutputModes, tcgetattr};
+    use rustix_openpty::openpty;
+    use std::os::fd::AsFd;
 
-    /// Serialize stdin-redirecting tests so they don't race each other.
-    static STDIN_LOCK: Mutex<()> = Mutex::new(());
-
-    fn termios_of(fd: libc::c_int) -> libc::termios {
-        unsafe {
-            let mut t: libc::termios = std::mem::zeroed();
-            assert_eq!(
-                libc::tcgetattr(fd, &mut t),
-                0,
-                "tcgetattr failed: {}",
-                std::io::Error::last_os_error()
-            );
-            t
-        }
-    }
-
-    /// Opens a pseudo-terminal pair. Returns `(master_fd, slave_fd)`.
-    fn open_pty() -> (libc::c_int, libc::c_int) {
-        let mut master: libc::c_int = -1;
-        let mut slave: libc::c_int = -1;
-        let ret = unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        assert_eq!(
-            ret,
-            0,
-            "openpty failed: {}",
-            std::io::Error::last_os_error()
-        );
-        (master, slave)
-    }
-
+    /// suppress_echo must clear ECHO/ECHOE on the target fd and return a
+    /// backup whose Termios can be used to restore the original state.
     #[test]
-    fn tty_display_disables_echo_and_restores_on_drop() {
-        let _guard = STDIN_LOCK.lock().unwrap();
+    fn suppress_echo_clears_echo_and_restore_brings_it_back() {
+        let pty = openpty(None, None).expect("openpty failed");
+        let user = pty.user.as_fd();
 
-        let (master, slave) = open_pty();
-
-        // Pty slave should start with echo enabled.
-        let before = termios_of(slave);
-        assert_ne!(
-            before.c_lflag & libc::ECHO,
-            0,
+        // Pty user side starts with echo enabled.
+        let before = tcgetattr(user).unwrap();
+        assert!(
+            before.local_modes.contains(LocalModes::ECHO),
             "pty should start with echo on"
         );
 
-        // Redirect stdin to the pty slave so TtyDisplay sees a real TTY fd.
-        let saved_stdin = unsafe { libc::dup(libc::STDIN_FILENO) };
-        assert_ne!(saved_stdin, -1);
-        assert_eq!(
-            unsafe { libc::dup2(slave, libc::STDIN_FILENO) },
-            libc::STDIN_FILENO
+        let backup = terminal_io::suppress_echo(user).expect("suppress_echo failed");
+
+        let during = tcgetattr(user).unwrap();
+        assert!(
+            !during.local_modes.contains(LocalModes::ECHO),
+            "ECHO should be cleared after suppress_echo"
+        );
+        assert!(
+            !during.local_modes.contains(LocalModes::ECHOE),
+            "ECHOE should also be cleared"
         );
 
-        {
-            let _display = TtyDisplay::new(Theme::new(false), Verbosity::Normal, false);
+        terminal_io::restore(user, &backup);
 
-            // Echo must be off while TtyDisplay is alive.
-            let during = termios_of(slave);
-            assert_eq!(
-                during.c_lflag & libc::ECHO,
-                0,
-                "ECHO should be cleared while TtyDisplay is alive"
-            );
-        } // ← TtyDisplay dropped here; Drop restores the original termios.
-
-        // Echo must be back on after drop.
-        let after = termios_of(slave);
-        assert_ne!(
-            after.c_lflag & libc::ECHO,
-            0,
-            "ECHO should be restored after TtyDisplay is dropped"
+        let after = tcgetattr(user).unwrap();
+        assert!(
+            after.local_modes.contains(LocalModes::ECHO),
+            "ECHO should be restored after restore()"
         );
+    }
 
-        // Clean up.
-        unsafe {
-            libc::dup2(saved_stdin, libc::STDIN_FILENO);
-            libc::close(saved_stdin);
-            libc::close(master);
-            libc::close(slave);
-        }
+    /// restore_signals_and_output must turn OPOST and ISIG back on, even if
+    /// they had been cleared (as crossterm's enable_raw_mode would).
+    #[test]
+    fn restore_signals_and_output_reenables_opost_and_isig() {
+        use rustix::termios::{OptionalActions, tcsetattr};
+
+        let pty = openpty(None, None).expect("openpty failed");
+        let user = pty.user.as_fd();
+
+        // Clear OPOST and ISIG to simulate raw-mode setup.
+        let mut t = tcgetattr(user).unwrap();
+        t.output_modes.remove(OutputModes::OPOST);
+        t.local_modes.remove(LocalModes::ISIG);
+        tcsetattr(user, OptionalActions::Now, &t).unwrap();
+
+        terminal_io::restore_signals_and_output(user);
+
+        let after = tcgetattr(user).unwrap();
+        assert!(
+            after.output_modes.contains(OutputModes::OPOST),
+            "OPOST should be re-enabled"
+        );
+        assert!(
+            after.local_modes.contains(LocalModes::ISIG),
+            "ISIG should be re-enabled"
+        );
     }
 }
