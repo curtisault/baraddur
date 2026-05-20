@@ -450,8 +450,9 @@ impl TtyDisplay {
         let mut lines = 0u16;
 
         if !self.run_divider.is_empty() {
-            println!("{}", self.divider_styled());
-            lines += 1;
+            let divider = self.divider_styled();
+            println!("{divider}");
+            lines += Self::visual_rows_for(&divider, width);
         }
 
         for (i, name) in self.step_names.iter().enumerate() {
@@ -498,17 +499,18 @@ impl TtyDisplay {
                 )
             };
 
-            if duration_str.is_empty() {
-                println!("{left}");
+            let line = if duration_str.is_empty() {
+                left
             } else {
                 let right = format!("{}", self.theme.dim(&duration_str));
                 let left_vis = visible_len(&left);
                 let right_vis = visible_len(&right);
                 let pad = width.saturating_sub(left_vis + right_vis);
-                println!("{left}{:pad$}{right}", "");
-            }
+                format!("{left}{:pad$}{right}", "")
+            };
 
-            lines += 1;
+            println!("{line}");
+            lines += Self::visual_rows_for(&line, width);
         }
 
         self.rendered_lines = lines;
@@ -598,7 +600,9 @@ impl TtyDisplay {
                 let left_vis = visible_len(&left);
                 let right_vis = visible_len(&right);
                 let pad = width.saturating_sub(left_vis + right_vis);
-                (format!("{left}{:pad$}{right}", ""), 1)
+                let line = format!("{left}{:pad$}{right}", "");
+                let r = Self::visual_rows_for(&line, width) as usize;
+                (line, r)
             };
 
             if i == self.cursor {
@@ -909,7 +913,8 @@ impl Display for TtyDisplay {
         let summary = parts.join(" · ");
         self.run_summary = summary.clone();
         println!("{summary}");
-        self.rendered_lines += 1;
+        let width = Self::term_width();
+        self.rendered_lines += Self::visual_rows_for(&summary, width);
 
         let _ = std::io::stdout().flush();
     }
