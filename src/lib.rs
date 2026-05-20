@@ -93,6 +93,11 @@ impl App {
         // when it completes, the user saves a file, or shutdown begins.
         let mut hook_handle: Option<HookHandle> = None;
 
+        // Relative paths of files that triggered the current pipeline run.
+        // `None` on the initial run; set on each `FileChange` and consumed by
+        // the next `run_pipeline` invocation for path-based step filtering.
+        let mut trigger_paths: Option<Vec<PathBuf>> = None;
+
         'main: loop {
             let outcome = tokio::select! {
                 biased;
@@ -111,6 +116,7 @@ impl App {
                     &self.root,
                     display.as_mut(),
                     spinner_interval,
+                    trigger_paths.as_deref(),
                 ) => RunOutcome::Completed(result),
             };
 
@@ -146,8 +152,10 @@ impl App {
                     if let Some(h) = hook_handle.take() {
                         h.abort();
                     }
+                    let rel = rel_paths(&paths, &self.root);
                     display.run_cancelled();
-                    display.set_trigger(&rel_paths(&paths, &self.root));
+                    display.set_trigger(&rel);
+                    trigger_paths = Some(rel);
                     continue;
                 }
                 RunOutcome::Shutdown => {
@@ -201,7 +209,9 @@ impl App {
                                             eprintln!("[debug]   triggered by: {}", p.display());
                                         }
                                     }
-                                    display.set_trigger(&rel_paths(&paths, &self.root));
+                                    let rel = rel_paths(&paths, &self.root);
+                                    display.set_trigger(&rel);
+                                    trigger_paths = Some(rel);
                                     continue 'main;
                                 }
                                 None => {
@@ -266,7 +276,9 @@ impl App {
                                         eprintln!("[debug]   triggered by: {}", p.display());
                                     }
                                 }
-                                display.set_trigger(&rel_paths(&paths, &self.root));
+                                let rel = rel_paths(&paths, &self.root);
+                                display.set_trigger(&rel);
+                                trigger_paths = Some(rel);
                                 break 'idle; // fall through to loop top → rerun pipeline
                             }
                             None => {

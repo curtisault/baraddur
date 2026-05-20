@@ -47,6 +47,15 @@ pub fn validate(cfg: &Config) -> Result<(), ValidationErrors> {
                 s.name, s.cmd
             ));
         }
+
+        for pat in &s.if_changed {
+            if let Err(e) = globset::Glob::new(pat) {
+                errs.push(format!(
+                    "step {idx} (`{}`) has an invalid if_changed glob `{pat}`: {e}",
+                    s.name
+                ));
+            }
+        }
     }
 
     if cfg.watch.debounce_ms < 50 {
@@ -95,6 +104,7 @@ mod tests {
                 name: "x".into(),
                 cmd: "true".into(),
                 parallel: false,
+                if_changed: Vec::new(),
             }],
         }
     }
@@ -120,15 +130,32 @@ mod tests {
                 name: "x".into(),
                 cmd: "true".into(),
                 parallel: false,
+                if_changed: Vec::new(),
             },
             Step {
                 name: "x".into(),
                 cmd: "true".into(),
                 parallel: false,
+                if_changed: Vec::new(),
             },
         ];
         let err = validate(&c).unwrap_err();
         assert!(err.to_string().contains("duplicate step name `x`"));
+    }
+
+    #[test]
+    fn rejects_invalid_glob() {
+        let mut c = base();
+        c.steps[0].if_changed = vec!["[invalid".into()];
+        let err = validate(&c).unwrap_err();
+        assert!(err.to_string().contains("invalid if_changed glob"));
+    }
+
+    #[test]
+    fn accepts_valid_globs() {
+        let mut c = base();
+        c.steps[0].if_changed = vec!["**/*.rs".into(), "src/**/*.toml".into()];
+        assert!(validate(&c).is_ok());
     }
 
     #[test]

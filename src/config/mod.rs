@@ -32,6 +32,8 @@ ignore = [\"target\", \".git\", \".baraddur\"]
 name = \"check\"
 cmd = \"cargo check\"
 parallel = false
+# if_changed = [\"**/*.rs\"]      # only run when matching paths change
+# cmd = \"cargo test {files}\"    # {files} → matched paths (shell-quoted)
 ";
 
 /// The result of a successful config load.

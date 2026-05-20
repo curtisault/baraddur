@@ -97,6 +97,12 @@ pub struct Step {
 
     #[serde(default)]
     pub parallel: bool,
+
+    /// Optional glob patterns. When a run is triggered by file changes, the
+    /// step runs only if at least one changed path matches a pattern. Empty
+    /// (default) means "always run". Matched against project-relative paths.
+    #[serde(default)]
+    pub if_changed: Vec<String>,
 }
 
 #[cfg(test)]

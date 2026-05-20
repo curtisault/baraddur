@@ -1,7 +1,9 @@
+pub mod filter;
 pub mod hook;
 pub mod runner;
 pub mod step;
 
+pub use filter::filter_and_template;
 pub use hook::{combine_failed_output, run_hook};
 pub use runner::run_pipeline;
 pub use step::{StepResult, run as run_step};
@@ -66,6 +68,7 @@ mod tests {
             name: name.into(),
             cmd: "true".into(),
             parallel,
+            if_changed: Vec::new(),
         }
     }
 

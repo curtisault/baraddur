@@ -25,6 +25,7 @@ fn trivial_app(td: &TempDir, step_cmd: &str) -> App {
             name: "noop".into(),
             cmd: step_cmd.into(),
             parallel: false,
+            if_changed: Vec::new(),
         }],
     };
     App {

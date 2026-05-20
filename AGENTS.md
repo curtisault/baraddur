@@ -34,6 +34,7 @@ src/
 - **Config** (`src/config/`): TOML deserialized with `deny_unknown_fields` on every struct. Adding a config field requires updating `schema.rs` *and* `validate.rs` together.
 - **Mid-run restart**: when a file change arrives while the pipeline is running, child processes are killed and the run restarts. Do not simplify this cancellation path away.
 - **on_failure hook** (`src/pipeline/hook.rs`): after a failing run, an optional user-configured command is spawned with the combined failed-step output on stdin. It runs asynchronously — the failure output is shown immediately, the hook output slots in when ready. The task is aborted (and its child killed via `kill_on_drop`) on file change or shutdown. Wired into `lib.rs::run_until` via `HookHandle` + `await_hook`.
+- **Path-based filtering** (`src/pipeline/filter.rs`): each step may declare `if_changed = [glob, ...]`. On a file-change run, `filter_and_template` excludes steps whose globs don't match any triggering path, and substitutes `{files}` in `cmd` with the matched (shell-quoted) paths. Initial runs (no trigger) run every step with `{files}` → empty. `trigger_paths: Option<Vec<PathBuf>>` lives in `lib.rs::run_until` and is overwritten on each `FileChange`.
 
 ## Invariants — Do Not Break
 
@@ -71,6 +72,8 @@ timeout_secs = 30
 name = "check"
 cmd = "cargo check"
 parallel = false       # sequential — blocks next step
+# if_changed = ["**/*.rs"]   # only run when matching paths change
+# cmd = "cargo test {files}" # {files} → matched paths (shell-quoted)
 
 [[steps]]
 name = "clippy"

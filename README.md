@@ -142,7 +142,42 @@ parallel = true   # runs concurrently with other parallel steps
 name = "test"
 cmd  = "mix test --failed"
 parallel = true
+if_changed = ["**/*.ex", "**/*.exs"]   # only run when matching paths change
+# cmd = "mix test {files}"             # {files} → matched paths, shell-quoted
 ```
+
+### Path-based step filtering
+
+Each step may declare `if_changed`, a list of glob patterns matched against
+paths reported by the file watcher. When set:
+
+- **File-change runs**: the step runs only if at least one changed path matches
+  a pattern. Steps with no matches are excluded from the run entirely (they
+  don't appear in the step list).
+- **Initial run** (no triggering files): every step runs, regardless of
+  `if_changed`. The empty default means "always run."
+
+The `{files}` token in `cmd` is substituted with the relevant paths,
+shell-quoted and space-separated:
+
+- A step with `if_changed` set: `{files}` is the matched subset.
+- A step without `if_changed`: `{files}` is every changed path.
+- Initial run: `{files}` is empty (so `cargo test {files}` → `cargo test`).
+
+```toml
+[[steps]]
+name = "type-check"
+cmd = "tsc --noEmit"
+if_changed = ["**/*.ts", "**/*.tsx"]
+
+[[steps]]
+name = "rust-test"
+cmd = "cargo test {files}"        # narrows test target to changed files
+if_changed = ["**/*.rs"]
+```
+
+Patterns use [`globset`](https://docs.rs/globset) syntax (gitignore-style globs
+with `**` and `*`).
 
 ### Examples
 
