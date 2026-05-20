@@ -5,6 +5,7 @@ pub mod watcher;
 
 use anyhow::Result;
 use std::fmt::Write as _;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -20,7 +21,22 @@ pub struct App {
 }
 
 impl App {
+    /// Convenience wrapper that uses Ctrl+C as the shutdown signal.
+    /// Production entry point.
     pub async fn run(self) -> Result<()> {
+        let stop = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+        self.run_until(stop).await
+    }
+
+    /// Runs the watch loop until either `stop` resolves or the watcher dies.
+    /// Exposed so tests can drive the loop without sending SIGINT to the test runner.
+    pub async fn run_until<F>(self, stop: F) -> Result<()>
+    where
+        F: Future<Output = ()>,
+    {
+        tokio::pin!(stop);
         let dc = &self.display_config;
         let color = should_color(dc.is_tty);
 
@@ -69,7 +85,7 @@ impl App {
             let outcome = tokio::select! {
                 biased;
 
-                _ = tokio::signal::ctrl_c() => RunOutcome::Shutdown,
+                _ = &mut stop => RunOutcome::Shutdown,
 
                 maybe = rx.recv() => {
                     match maybe {
@@ -135,7 +151,7 @@ impl App {
                     tokio::select! {
                         biased;
 
-                        _ = tokio::signal::ctrl_c() => {
+                        _ = &mut stop => {
                             display.exit_browse_mode();
                             return self.shutdown();
                         }
@@ -186,7 +202,7 @@ impl App {
             tokio::select! {
                 biased;
 
-                _ = tokio::signal::ctrl_c() => {
+                _ = &mut stop => {
                     return self.shutdown();
                 }
 
