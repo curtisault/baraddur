@@ -47,6 +47,15 @@ pub fn validate(cfg: &Config) -> Result<(), ValidationErrors> {
                 s.name, s.cmd
             ));
         }
+
+        for pat in &s.if_changed {
+            if let Err(e) = globset::Glob::new(pat) {
+                errs.push(format!(
+                    "step {idx} (`{}`) has an invalid if_changed glob `{pat}`: {e}",
+                    s.name
+                ));
+            }
+        }
     }
 
     if cfg.watch.debounce_ms < 50 {
@@ -56,8 +65,18 @@ pub fn validate(cfg: &Config) -> Result<(), ValidationErrors> {
         ));
     }
 
-    if cfg.summarize.timeout_secs == 0 {
-        errs.push("summarize.timeout_secs must be > 0".into());
+    if cfg.on_failure.enabled {
+        if cfg.on_failure.cmd.trim().is_empty() {
+            errs.push("on_failure.enabled = true but on_failure.cmd is empty".into());
+        } else if shell_words::split(&cfg.on_failure.cmd).is_err() {
+            errs.push(format!(
+                "on_failure.cmd is unparseable: {}",
+                cfg.on_failure.cmd
+            ));
+        }
+        if cfg.on_failure.timeout_secs == 0 {
+            errs.push("on_failure.timeout_secs must be > 0".into());
+        }
     }
 
     if errs.is_empty() {
@@ -70,7 +89,7 @@ pub fn validate(cfg: &Config) -> Result<(), ValidationErrors> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::schema::{Config, OutputConfig, Step, SummarizeConfig, WatchConfig};
+    use crate::config::schema::{Config, OnFailureConfig, OutputConfig, Step, WatchConfig};
 
     fn base() -> Config {
         Config {
@@ -80,11 +99,12 @@ mod tests {
                 ignore: vec![],
             },
             output: OutputConfig::default(),
-            summarize: SummarizeConfig::default(),
+            on_failure: OnFailureConfig::default(),
             steps: vec![Step {
                 name: "x".into(),
                 cmd: "true".into(),
                 parallel: false,
+                if_changed: Vec::new(),
             }],
         }
     }
@@ -110,15 +130,32 @@ mod tests {
                 name: "x".into(),
                 cmd: "true".into(),
                 parallel: false,
+                if_changed: Vec::new(),
             },
             Step {
                 name: "x".into(),
                 cmd: "true".into(),
                 parallel: false,
+                if_changed: Vec::new(),
             },
         ];
         let err = validate(&c).unwrap_err();
         assert!(err.to_string().contains("duplicate step name `x`"));
+    }
+
+    #[test]
+    fn rejects_invalid_glob() {
+        let mut c = base();
+        c.steps[0].if_changed = vec!["[invalid".into()];
+        let err = validate(&c).unwrap_err();
+        assert!(err.to_string().contains("invalid if_changed glob"));
+    }
+
+    #[test]
+    fn accepts_valid_globs() {
+        let mut c = base();
+        c.steps[0].if_changed = vec!["**/*.rs".into(), "src/**/*.toml".into()];
+        assert!(validate(&c).is_ok());
     }
 
     #[test]
@@ -155,5 +192,32 @@ mod tests {
         let mut c = base();
         c.watch.extensions.clear();
         assert!(validate(&c).is_ok());
+    }
+
+    #[test]
+    fn on_failure_enabled_requires_cmd() {
+        let mut c = base();
+        c.on_failure.enabled = true;
+        c.on_failure.cmd = String::new();
+        let err = validate(&c).unwrap_err();
+        assert!(err.to_string().contains("on_failure.cmd"));
+    }
+
+    #[test]
+    fn on_failure_disabled_ignores_empty_cmd() {
+        let mut c = base();
+        c.on_failure.enabled = false;
+        c.on_failure.cmd = String::new();
+        assert!(validate(&c).is_ok());
+    }
+
+    #[test]
+    fn on_failure_rejects_zero_timeout() {
+        let mut c = base();
+        c.on_failure.enabled = true;
+        c.on_failure.cmd = "cat".into();
+        c.on_failure.timeout_secs = 0;
+        let err = validate(&c).unwrap_err();
+        assert!(err.to_string().contains("timeout_secs"));
     }
 }

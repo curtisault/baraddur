@@ -1,18 +1,27 @@
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::task::JoinSet;
 
+use super::filter::filter_and_template;
 use super::group_into_stages;
 use super::step::{self, StepResult};
 use crate::config::Config;
 use crate::output::Display;
 
-/// Runs the full pipeline: groups steps into stages, executes each stage
+/// Runs the full pipeline: filters steps by `trigger` (when present),
+/// substitutes `{files}` templates, groups into stages, executes each stage
 /// (sequentially or in parallel), stops after the first failing stage.
 ///
 /// `spinner_interval` — when `Some`, ticks the display spinner at that rate
 /// while steps are executing. Pass `None` in non-TTY mode or tests.
+///
+/// `trigger` — relative paths of files that triggered this run. `None` for
+/// the initial run; `Some(&[])` is treated like `Some(&paths)` with empty.
+///
+/// `only_steps` — when `Some`, narrows the final step list to entries whose
+/// `name` appears in the slice. Applied after path-based filtering. Used by
+/// the browse-mode "rerun failed" key.
 ///
 /// Returns all `StepResult`s for steps that actually ran (not skipped).
 pub async fn run_pipeline(
@@ -20,12 +29,20 @@ pub async fn run_pipeline(
     cwd: &Path,
     display: &mut dyn Display,
     spinner_interval: Option<Duration>,
+    trigger: Option<&[PathBuf]>,
+    only_steps: Option<&[String]>,
 ) -> Result<Vec<StepResult>> {
-    let step_names: Vec<String> = config.steps.iter().map(|s| s.name.clone()).collect();
+    let mut active_steps = filter_and_template(&config.steps, trigger)?;
+
+    if let Some(names) = only_steps {
+        active_steps.retain(|s| names.iter().any(|n| n == &s.name));
+    }
+
+    let step_names: Vec<String> = active_steps.iter().map(|s| s.name.clone()).collect();
     display.run_started(&step_names);
 
-    let stages = group_into_stages(&config.steps);
-    let mut all_results: Vec<StepResult> = Vec::with_capacity(config.steps.len());
+    let stages = group_into_stages(&active_steps);
+    let mut all_results: Vec<StepResult> = Vec::with_capacity(active_steps.len());
     let mut stage_failed = false;
 
     for stage in &stages {

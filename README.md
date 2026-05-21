@@ -100,6 +100,8 @@ After each run, baraddur enters an interactive browse mode:
 | `G` | jump to last step |
 | `Enter` / `o` | toggle output for selected step |
 | `O` | expand all / collapse all |
+| `r` | rerun the full pipeline |
+| `f` | rerun only steps that failed last run (no-op if none failed) |
 | `q` | quit baraddur |
 
 Failing steps start with their output expanded. Save a file to exit browse mode
@@ -122,8 +124,11 @@ ignore = ["_build", "deps", ".git", ".baraddur"] # names match any path componen
 clear_screen = true   # clear the terminal between runs
 show_passing = false  # hide stdout/stderr from passing steps
 
-[summarize]
-enabled = false  # opt-in LLM failure summaries (not yet implemented)
+[on_failure]            # optional post-failure hook
+enabled = false         # off by default; opt in per-project
+cmd = ""                # any command; receives combined failed output on stdin
+prompt = ""             # optional preamble prepended to stdin before the output
+timeout_secs = 30       # killed if it runs longer
 
 [[steps]]
 name = "format"
@@ -139,7 +144,42 @@ parallel = true   # runs concurrently with other parallel steps
 name = "test"
 cmd  = "mix test --failed"
 parallel = true
+if_changed = ["**/*.ex", "**/*.exs"]   # only run when matching paths change
+# cmd = "mix test {files}"             # {files} → matched paths, shell-quoted
 ```
+
+### Path-based step filtering
+
+Each step may declare `if_changed`, a list of glob patterns matched against
+paths reported by the file watcher. When set:
+
+- **File-change runs**: the step runs only if at least one changed path matches
+  a pattern. Steps with no matches are excluded from the run entirely (they
+  don't appear in the step list).
+- **Initial run** (no triggering files): every step runs, regardless of
+  `if_changed`. The empty default means "always run."
+
+The `{files}` token in `cmd` is substituted with the relevant paths,
+shell-quoted and space-separated:
+
+- A step with `if_changed` set: `{files}` is the matched subset.
+- A step without `if_changed`: `{files}` is every changed path.
+- Initial run: `{files}` is empty (so `cargo test {files}` → `cargo test`).
+
+```toml
+[[steps]]
+name = "type-check"
+cmd = "tsc --noEmit"
+if_changed = ["**/*.ts", "**/*.tsx"]
+
+[[steps]]
+name = "rust-test"
+cmd = "cargo test {files}"        # narrows test target to changed files
+if_changed = ["**/*.rs"]
+```
+
+Patterns use [`globset`](https://docs.rs/globset) syntax (gitignore-style globs
+with `**` and `*`).
 
 ### Examples
 
@@ -255,6 +295,36 @@ features like pipes, `&&`, and glob expansion are not supported. For those, use
 cmd = "sh -c 'mix compile 2>&1 | head -50'"
 ```
 
+### Post-failure hook
+
+When `[on_failure].enabled = true` and any step in a completed run fails, the
+configured `cmd` is spawned with the combined stdout+stderr of failing steps on
+stdin. `prompt` (if non-empty) is prepended as a preamble. The captured stdout
+is shown below the failure summary; non-zero exits, empty stdout, and timeouts
+are silently suppressed (with a stderr diagnostic).
+
+The hook runs asynchronously — your failure output is shown immediately and the
+hook output slots in when ready. A file change cancels the in-flight hook and
+kills the subprocess.
+
+Examples:
+
+```toml
+# Pipe the failure output through an LLM CLI for a short summary.
+[on_failure]
+enabled = true
+cmd = "claude -p"
+prompt = "Summarize these failures in under 5 lines. Cite file:line where possible."
+timeout_secs = 60
+```
+
+```toml
+# Just grab the first few error lines — no LLM needed.
+[on_failure]
+enabled = true
+cmd = "sh -c 'grep -E \"(FAIL|panic|error)\" | head -5'"
+```
+
 ## Security
 
 `.baraddur.toml` is **executable trust**: every `cmd` you list runs as your user
@@ -340,5 +410,4 @@ lines with an elision marker pointing to the log file.
 
 ## Future ideas
 
-- LLM failure summaries (pipe combined stdout/stderr to a configurable CLI for a short post-failure recap)
 - Homebrew tap

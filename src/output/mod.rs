@@ -28,6 +28,13 @@ pub enum BrowseAction {
     Redraw,
     /// User pressed `q`; caller should exit browse mode and shut down the app.
     Quit,
+    /// User pressed `r`; caller should exit browse mode and rerun the full
+    /// pipeline (equivalent to the initial run — no trigger, no step filter).
+    Rerun,
+    /// User pressed `f`; caller should exit browse mode and rerun only the
+    /// steps that failed in the previous run. Display returns this only if
+    /// at least one step in the current view was marked Failed.
+    RerunFailed,
 }
 
 /// Sink for pipeline lifecycle events.
@@ -84,4 +91,20 @@ pub trait Display: Send {
     /// Redraw the browse step list if browse mode is currently active.
     /// Default is a no-op (PlainDisplay).
     fn browse_redraw_if_active(&mut self) {}
+
+    /// Show output from the configured `[on_failure]` hook. Called from the
+    /// main loop after the hook subprocess completes successfully.
+    /// Default is a no-op.
+    fn hook_output(&mut self, _text: &str) {}
+
+    /// A `[on_failure]` hook task has been spawned. Implementations should
+    /// show a "running" indicator to make the async work visible.
+    /// Default is a no-op.
+    fn hook_started(&mut self) {}
+
+    /// The hook task has settled (completed normally, timed out, exited
+    /// non-zero, or was aborted). Implementations should clear any "running"
+    /// indicator. Always called when the task exits, regardless of outcome.
+    /// Default is a no-op.
+    fn hook_finished(&mut self) {}
 }

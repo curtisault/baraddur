@@ -143,6 +143,10 @@ pub struct PlainDisplay {
     trigger_paths: Option<Vec<PathBuf>>,
     run_start: Option<Instant>,
     run_count: usize,
+    /// True if the run that just started was triggered by file changes;
+    /// used by `run_finished` to emit "no steps match changed paths" when
+    /// the trigger left zero applicable steps.
+    last_run_triggered: bool,
 }
 
 impl PlainDisplay {
@@ -153,6 +157,7 @@ impl PlainDisplay {
             trigger_paths: None,
             run_start: None,
             run_count: 0,
+            last_run_triggered: false,
         }
     }
 }
@@ -173,8 +178,9 @@ impl Display for PlainDisplay {
     fn run_started(&mut self, _step_names: &[String]) {
         self.run_start = Some(Instant::now());
         self.run_count += 1;
+        let trigger = self.trigger_paths.take();
+        self.last_run_triggered = trigger.is_some();
         if self.verbosity != Verbosity::Quiet {
-            let trigger = self.trigger_paths.take();
             let suffix = format_trigger_suffix(trigger.as_deref());
             println!("[{}] run #{} started{suffix}", timestamp(), self.run_count);
         }
@@ -252,7 +258,32 @@ impl Display for PlainDisplay {
             println!("[{ts}] run complete: {failed} failed, {passed} passed, {elapsed:.1}s");
         }
 
+        // File-change run produced zero applicable steps — surface this so
+        // the user knows their save didn't trigger any work.
+        if results.is_empty() && self.last_run_triggered && self.verbosity != Verbosity::Quiet {
+            println!("[{ts}] no steps match changed paths");
+        }
+
         let _ = std::io::stdout().flush();
+    }
+
+    fn hook_output(&mut self, text: &str) {
+        if self.verbosity == Verbosity::Quiet {
+            return;
+        }
+        let ts = timestamp();
+        println!("[{ts}] --- on_failure ---");
+        for line in text.lines() {
+            println!("  {line}");
+        }
+        let _ = std::io::stdout().flush();
+    }
+
+    fn hook_started(&mut self) {
+        if self.verbosity != Verbosity::Quiet {
+            println!("[{}] on_failure hook running…", timestamp());
+            let _ = std::io::stdout().flush();
+        }
     }
 }
 
@@ -317,6 +348,20 @@ pub struct TtyDisplay {
     /// Terminal row offset for browse-mode viewport scrolling.
     /// Ensures the cursor step is always visible even when output overflows the screen.
     browse_scroll: usize,
+    /// Captured output from the `[on_failure]` hook for the current run, if any.
+    /// Rendered as a dim block between the run summary and the help bar.
+    hook_output_text: String,
+    /// One-shot status message shown below the help bar (e.g., "no failures
+    /// to rerun" when the user presses `f` with no failed steps). Cleared at
+    /// the start of any recognized recognized key press and on `run_started`.
+    transient_message: Option<String>,
+    /// Snapshot of `trigger_paths` consumed by `run_started`, preserved so
+    /// `run_finished` can detect "file change → 0 steps matched" and surface
+    /// a `no steps match changed paths` message.
+    last_trigger_paths: Option<Vec<PathBuf>>,
+    /// True while an `[on_failure]` hook task is in flight. Renders a dim
+    /// "running on_failure hook…" line between the summary and help bar.
+    hook_running: bool,
 }
 
 impl Drop for TtyDisplay {
@@ -368,6 +413,10 @@ impl TtyDisplay {
             run_start: None,
             run_summary: String::new(),
             browse_scroll: 0,
+            hook_output_text: String::new(),
+            transient_message: None,
+            last_trigger_paths: None,
+            hook_running: false,
         }
     }
 
@@ -434,8 +483,9 @@ impl TtyDisplay {
         let mut lines = 0u16;
 
         if !self.run_divider.is_empty() {
-            println!("{}", self.divider_styled());
-            lines += 1;
+            let divider = self.divider_styled();
+            println!("{divider}");
+            lines += Self::visual_rows_for(&divider, width);
         }
 
         for (i, name) in self.step_names.iter().enumerate() {
@@ -482,17 +532,18 @@ impl TtyDisplay {
                 )
             };
 
-            if duration_str.is_empty() {
-                println!("{left}");
+            let line = if duration_str.is_empty() {
+                left
             } else {
                 let right = format!("{}", self.theme.dim(&duration_str));
                 let left_vis = visible_len(&left);
                 let right_vis = visible_len(&right);
                 let pad = width.saturating_sub(left_vis + right_vis);
-                println!("{left}{:pad$}{right}", "");
-            }
+                format!("{left}{:pad$}{right}", "")
+            };
 
-            lines += 1;
+            println!("{line}");
+            lines += Self::visual_rows_for(&line, width);
         }
 
         self.rendered_lines = lines;
@@ -582,7 +633,9 @@ impl TtyDisplay {
                 let left_vis = visible_len(&left);
                 let right_vis = visible_len(&right);
                 let pad = width.saturating_sub(left_vis + right_vis);
-                (format!("{left}{:pad$}{right}", ""), 1)
+                let line = format!("{left}{:pad$}{right}", "");
+                let r = Self::visual_rows_for(&line, width) as usize;
+                (line, r)
             };
 
             if i == self.cursor {
@@ -610,9 +663,35 @@ impl TtyDisplay {
                 all_lines.push((String::new(), 1));
                 cumulative += 2;
             }
-            let help = "  j/k ↑/↓  navigate · Enter/o  toggle output · O  expand all · q  quit";
+            // Hook slot: "running…" while in flight; output once settled.
+            // Only one of the two is shown at a time.
+            if self.hook_running {
+                let line = format!("  {}", self.theme.dim("running on_failure hook…"));
+                let r = Self::visual_rows_for(&line, width) as usize;
+                all_lines.push((line, r));
+                cumulative += r;
+                all_lines.push((String::new(), 1));
+                cumulative += 1;
+            } else if !self.hook_output_text.is_empty() {
+                for line in self.hook_output_text.lines() {
+                    let styled = format!("  {}", self.theme.dim(line));
+                    let r = Self::visual_rows_for(&styled, width) as usize;
+                    all_lines.push((styled, r));
+                    cumulative += r;
+                }
+                all_lines.push((String::new(), 1));
+                cumulative += 1;
+            }
+            let help = "  j/k ↑/↓  nav · Enter/o  toggle · O  expand all · r  rerun · f  rerun failed · q  quit";
             all_lines.push((format!("{}", self.theme.dim(help)), 1));
             cumulative += 2;
+
+            if let Some(msg) = &self.transient_message {
+                let line = format!("  {}", self.theme.yellow(msg));
+                let r = Self::visual_rows_for(&line, width) as usize;
+                all_lines.push((line, r));
+                cumulative += r;
+            }
         }
 
         // ── Adjust scroll so cursor step stays in viewport ───────────────
@@ -758,6 +837,14 @@ impl Display for TtyDisplay {
         self.browse_active = false;
         self.last_key = None;
         self.browse_scroll = 0;
+        self.hook_output_text.clear();
+        self.transient_message = None;
+        self.hook_running = false;
+
+        // Stash trigger BEFORE moving the value into the divider, so
+        // `run_finished` can detect "file change → zero steps matched".
+        let trigger = self.trigger_paths.take();
+        self.last_trigger_paths = trigger.clone();
 
         if self.verbosity == Verbosity::Quiet {
             return;
@@ -777,7 +864,6 @@ impl Display for TtyDisplay {
         // Build and store the divider text. redraw() will print it (as its first line)
         // and recolor it live based on statuses, so no println! or cursor position needed.
         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
-        let trigger = self.trigger_paths.take();
         let trigger_str = format_trigger_suffix(trigger.as_deref());
         let width = Self::term_width();
         let prefix = format!("━━━ #{} {ts}{trigger_str} ", self.run_count);
@@ -882,7 +968,21 @@ impl Display for TtyDisplay {
         let summary = parts.join(" · ");
         self.run_summary = summary.clone();
         println!("{summary}");
-        self.rendered_lines += 1;
+        let width = Self::term_width();
+        self.rendered_lines += Self::visual_rows_for(&summary, width);
+
+        // File-change run with zero applicable steps after path filtering —
+        // surface this so a save doesn't look like a silent no-op. Shown in
+        // the transient-message slot below the help bar.
+        if results.is_empty() && self.last_trigger_paths.is_some() {
+            self.transient_message = Some(match self.last_trigger_paths.as_deref() {
+                Some([p]) => format!("no steps match changed path: {}", p.display()),
+                Some(ps) if ps.len() > 1 => {
+                    format!("no steps match {} changed paths", ps.len())
+                }
+                _ => "no steps match changed paths".into(),
+            });
+        }
 
         let _ = std::io::stdout().flush();
     }
@@ -916,6 +1016,30 @@ impl Display for TtyDisplay {
         }
     }
 
+    fn hook_output(&mut self, text: &str) {
+        self.hook_output_text = text.to_string();
+        // Receiving output implies the hook settled; clear the running flag
+        // even if `hook_finished` hasn't been called yet.
+        self.hook_running = false;
+        if self.browse_active {
+            self.browse_redraw();
+        }
+    }
+
+    fn hook_started(&mut self) {
+        self.hook_running = true;
+        if self.browse_active {
+            self.browse_redraw();
+        }
+    }
+
+    fn hook_finished(&mut self) {
+        self.hook_running = false;
+        if self.browse_active {
+            self.browse_redraw();
+        }
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> BrowseAction {
         let n = self.step_names.len();
         if n == 0 {
@@ -926,7 +1050,13 @@ impl Display for TtyDisplay {
             };
         }
 
-        match key.code {
+        // Any recognized key dismisses a prior transient message. The 'f'-no-
+        // failures arm re-sets it below. If we cleared a visible message but
+        // the resulting action is Noop, promote to Redraw so the message
+        // actually disappears from the screen.
+        let had_message = self.transient_message.take().is_some();
+
+        let action = match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
                 self.cursor = (self.cursor + 1).min(n - 1);
                 self.last_key = None;
@@ -965,12 +1095,39 @@ impl Display for TtyDisplay {
                 self.last_key = None;
                 BrowseAction::Redraw
             }
+            KeyCode::Char('r') => {
+                self.last_key = None;
+                BrowseAction::Rerun
+            }
+            KeyCode::Char('f') => {
+                self.last_key = None;
+                // Only meaningful if there were failures to retry. Otherwise
+                // surface a one-shot message so the user knows the key was
+                // received but had nothing to act on.
+                if self
+                    .statuses
+                    .iter()
+                    .any(|s| matches!(s, StepStatus::Failed(..)))
+                {
+                    BrowseAction::RerunFailed
+                } else {
+                    self.transient_message = Some("no failures to re-run".into());
+                    BrowseAction::Redraw
+                }
+            }
             KeyCode::Char('q') => BrowseAction::Quit,
             _ => {
                 // Any unrecognized key clears the pending `g` chord.
                 self.last_key = None;
                 BrowseAction::Noop
             }
+        };
+
+        // Hide a just-cleared message even when no other state changed.
+        if matches!(action, BrowseAction::Noop) && had_message {
+            BrowseAction::Redraw
+        } else {
+            action
         }
     }
 }

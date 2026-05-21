@@ -1,4 +1,4 @@
-use baraddur::config::{Config, OutputConfig, Step, SummarizeConfig, WatchConfig};
+use baraddur::config::{Config, OnFailureConfig, OutputConfig, Step, WatchConfig};
 use baraddur::output::Display;
 use baraddur::pipeline;
 use baraddur::pipeline::StepResult;
@@ -47,7 +47,7 @@ fn make_config(steps: Vec<Step>) -> Config {
             ignore: vec![],
         },
         output: OutputConfig::default(),
-        summarize: SummarizeConfig::default(),
+        on_failure: OnFailureConfig::default(),
         steps,
     }
 }
@@ -61,22 +61,25 @@ async fn sequential_stops_at_first_failure() {
             name: "first".into(),
             cmd: "true".into(),
             parallel: false,
+            if_changed: Vec::new(),
         },
         Step {
             name: "second".into(),
             cmd: "false".into(),
             parallel: false,
+            if_changed: Vec::new(),
         },
         Step {
             name: "third".into(),
             cmd: "true".into(),
             parallel: false,
+            if_changed: Vec::new(),
         },
     ]);
     let mut display = RecordingDisplay::default();
     let cwd = std::env::current_dir().unwrap();
 
-    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None)
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None, None, None)
         .await
         .unwrap();
 
@@ -101,22 +104,25 @@ async fn sequential_all_pass() {
             name: "a".into(),
             cmd: "true".into(),
             parallel: false,
+            if_changed: Vec::new(),
         },
         Step {
             name: "b".into(),
             cmd: "true".into(),
             parallel: false,
+            if_changed: Vec::new(),
         },
         Step {
             name: "c".into(),
             cmd: "true".into(),
             parallel: false,
+            if_changed: Vec::new(),
         },
     ]);
     let mut display = RecordingDisplay::default();
     let cwd = std::env::current_dir().unwrap();
 
-    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None)
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None, None, None)
         .await
         .unwrap();
 
@@ -133,22 +139,25 @@ async fn parallel_steps_all_run() {
             name: "a".into(),
             cmd: "true".into(),
             parallel: true,
+            if_changed: Vec::new(),
         },
         Step {
             name: "b".into(),
             cmd: "true".into(),
             parallel: true,
+            if_changed: Vec::new(),
         },
         Step {
             name: "c".into(),
             cmd: "true".into(),
             parallel: true,
+            if_changed: Vec::new(),
         },
     ]);
     let mut display = RecordingDisplay::default();
     let cwd = std::env::current_dir().unwrap();
 
-    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None)
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None, None, None)
         .await
         .unwrap();
 
@@ -180,17 +189,19 @@ async fn parallel_stage_runs_all_even_if_one_fails() {
             name: "pass".into(),
             cmd: "true".into(),
             parallel: true,
+            if_changed: Vec::new(),
         },
         Step {
             name: "fail".into(),
             cmd: "false".into(),
             parallel: true,
+            if_changed: Vec::new(),
         },
     ]);
     let mut display = RecordingDisplay::default();
     let cwd = std::env::current_dir().unwrap();
 
-    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None)
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None, None, None)
         .await
         .unwrap();
 
@@ -209,18 +220,20 @@ async fn parallel_wall_clock_is_max_not_sum() {
             name: "slow_a".into(),
             cmd: "sleep 0.3".into(),
             parallel: true,
+            if_changed: Vec::new(),
         },
         Step {
             name: "slow_b".into(),
             cmd: "sleep 0.3".into(),
             parallel: true,
+            if_changed: Vec::new(),
         },
     ]);
     let mut display = RecordingDisplay::default();
     let cwd = std::env::current_dir().unwrap();
 
     let start = std::time::Instant::now();
-    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None)
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None, None, None)
         .await
         .unwrap();
     let elapsed = start.elapsed();
@@ -242,22 +255,25 @@ async fn mixed_stages_sequential_then_parallel() {
             name: "seq".into(),
             cmd: "true".into(),
             parallel: false,
+            if_changed: Vec::new(),
         },
         Step {
             name: "par_a".into(),
             cmd: "true".into(),
             parallel: true,
+            if_changed: Vec::new(),
         },
         Step {
             name: "par_b".into(),
             cmd: "true".into(),
             parallel: true,
+            if_changed: Vec::new(),
         },
     ]);
     let mut display = RecordingDisplay::default();
     let cwd = std::env::current_dir().unwrap();
 
-    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None)
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None, None, None)
         .await
         .unwrap();
 
@@ -281,22 +297,25 @@ async fn stage_failure_skips_subsequent_stages() {
             name: "fail".into(),
             cmd: "false".into(),
             parallel: false,
+            if_changed: Vec::new(),
         },
         Step {
             name: "skip_a".into(),
             cmd: "true".into(),
             parallel: true,
+            if_changed: Vec::new(),
         },
         Step {
             name: "skip_b".into(),
             cmd: "true".into(),
             parallel: true,
+            if_changed: Vec::new(),
         },
     ]);
     let mut display = RecordingDisplay::default();
     let cwd = std::env::current_dir().unwrap();
 
-    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None)
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None, None, None)
         .await
         .unwrap();
 
@@ -316,11 +335,12 @@ async fn captures_stdout_and_stderr_on_failure() {
         name: "noisyfail".into(),
         cmd: "sh -c 'echo out; echo err >&2; exit 1'".into(),
         parallel: false,
+        if_changed: Vec::new(),
     }]);
     let mut display = RecordingDisplay::default();
     let cwd = std::env::current_dir().unwrap();
 
-    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None)
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None, None, None)
         .await
         .unwrap();
 
@@ -328,4 +348,151 @@ async fn captures_stdout_and_stderr_on_failure() {
     assert!(!results[0].success);
     assert!(results[0].stdout.contains("out"));
     assert!(results[0].stderr.contains("err"));
+}
+
+// ── Path-based filtering ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn trigger_excludes_steps_with_no_glob_matches() {
+    use std::path::PathBuf;
+
+    let cfg = make_config(vec![
+        Step {
+            name: "rust".into(),
+            cmd: "true".into(),
+            parallel: false,
+            if_changed: vec!["**/*.rs".into()],
+        },
+        Step {
+            name: "ts".into(),
+            cmd: "true".into(),
+            parallel: false,
+            if_changed: vec!["**/*.ts".into()],
+        },
+    ]);
+    let mut display = RecordingDisplay::default();
+    let cwd = std::env::current_dir().unwrap();
+
+    // Only a .ts file changed — the rust step should be excluded entirely.
+    let trigger = vec![PathBuf::from("src/app.ts")];
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None, Some(&trigger), None)
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].name, "ts");
+    assert!(
+        !display.events.iter().any(|e| e.contains("rust")),
+        "rust step should not appear in events"
+    );
+}
+
+#[tokio::test]
+async fn files_template_substitutes_matched_paths() {
+    use std::path::PathBuf;
+
+    // `printf %s {files}` writes the substituted paths to stdout — easy to
+    // assert on.
+    let cfg = make_config(vec![Step {
+        name: "echo".into(),
+        cmd: "printf %s {files}".into(),
+        parallel: false,
+        if_changed: vec!["**/*.rs".into()],
+    }]);
+    let mut display = RecordingDisplay::default();
+    let cwd = std::env::current_dir().unwrap();
+
+    let trigger = vec![PathBuf::from("src/a.rs"), PathBuf::from("README.md")];
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None, Some(&trigger), None)
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    // Only the .rs path should have been substituted.
+    assert_eq!(results[0].stdout, "src/a.rs");
+}
+
+#[tokio::test]
+async fn initial_run_runs_all_steps_ignoring_if_changed() {
+    let cfg = make_config(vec![Step {
+        name: "rust".into(),
+        cmd: "true".into(),
+        parallel: false,
+        if_changed: vec!["**/*.rs".into()],
+    }]);
+    let mut display = RecordingDisplay::default();
+    let cwd = std::env::current_dir().unwrap();
+
+    // Initial run = trigger is None. Step must run despite if_changed.
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert!(results[0].success);
+}
+
+#[tokio::test]
+async fn only_steps_narrows_to_named_subset() {
+    // Simulates the browse-mode `f` key: rerun only steps that previously failed.
+    let cfg = make_config(vec![
+        Step {
+            name: "a".into(),
+            cmd: "true".into(),
+            parallel: false,
+            if_changed: Vec::new(),
+        },
+        Step {
+            name: "b".into(),
+            cmd: "true".into(),
+            parallel: false,
+            if_changed: Vec::new(),
+        },
+        Step {
+            name: "c".into(),
+            cmd: "true".into(),
+            parallel: false,
+            if_changed: Vec::new(),
+        },
+    ]);
+    let mut display = RecordingDisplay::default();
+    let cwd = std::env::current_dir().unwrap();
+
+    let only = vec!["b".to_string()];
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None, None, Some(&only))
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].name, "b");
+    // The other steps shouldn't appear in the recorded events.
+    assert!(
+        !display
+            .events
+            .iter()
+            .any(|e| e.ends_with(":a") || e.ends_with(":c")),
+        "only step `b` should appear; got: {:?}",
+        display.events
+    );
+}
+
+#[tokio::test]
+async fn only_steps_empty_runs_nothing() {
+    // Edge: pressing `f` after an all-pass run gives an empty filter; pipeline
+    // should run zero steps but not error.
+    let cfg = make_config(vec![Step {
+        name: "a".into(),
+        cmd: "true".into(),
+        parallel: false,
+        if_changed: Vec::new(),
+    }]);
+    let mut display = RecordingDisplay::default();
+    let cwd = std::env::current_dir().unwrap();
+
+    let only: Vec<String> = Vec::new();
+    let results = pipeline::run_pipeline(&cfg, &cwd, &mut display, None, None, Some(&only))
+        .await
+        .unwrap();
+
+    assert!(results.is_empty());
 }
