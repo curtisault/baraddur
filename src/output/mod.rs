@@ -1,3 +1,4 @@
+pub mod diagnostic;
 pub mod display;
 pub mod style;
 pub use display::{PlainDisplay, TtyDisplay};
