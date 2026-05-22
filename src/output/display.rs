@@ -400,6 +400,9 @@ pub struct TtyDisplay {
     /// command without actually exec'ing a subprocess. Default uses
     /// `$VISUAL` → `$EDITOR` → `vi` with `+LINE FILE`.
     editor_spawn: EditorSpawn,
+    /// True while the `?` help modal is showing. The modal replaces the
+    /// one-line help bar with a vertical key reference. Any key dismisses.
+    help_modal_active: bool,
 }
 
 /// `(file, line, col?)` → spawn-and-wait outcome. Returns `Ok(())` when the
@@ -464,6 +467,7 @@ impl TtyDisplay {
             parsed_diagnostics: Vec::new(),
             current_diagnostic: Vec::new(),
             editor_spawn: Box::new(default_editor_spawn),
+            help_modal_active: false,
         }
     }
 
@@ -533,6 +537,61 @@ impl TtyDisplay {
             self.browse_redraw();
         }
         result
+    }
+
+    /// Builds the rendered, styled lines of the `?` help modal. Two-column
+    /// vertical key reference; section headers in cyan, body dim. Returned
+    /// as `Vec<String>` so the caller can size each line individually.
+    fn help_modal_lines(&self) -> Vec<String> {
+        // Each row is `(left, right)`; either may be empty for spacers and
+        // section headers that only occupy one column.
+        let rows: &[(&str, &str)] = &[
+            ("Navigation", "Diagnostics"),
+            ("  j / ↓   down", "  n   next"),
+            ("  k / ↑   up", "  p   prev"),
+            ("  g g     top", "  e   open in editor"),
+            ("  G       bottom", ""),
+            ("", ""),
+            ("Output", "Rerun"),
+            ("  Enter / o  toggle", "  r   pipeline"),
+            ("  O          expand", "  f   failed steps"),
+            ("", "  c   step under cursor"),
+        ];
+
+        let col_width = 26usize;
+        let mut out = Vec::with_capacity(rows.len() + 4);
+
+        // Header.
+        out.push(format!("  {}", self.theme.cyan("Help")));
+        out.push(String::new());
+
+        for (left, right) in rows {
+            let is_header = !left.is_empty() && !left.starts_with(' ');
+            let is_right_header = !right.is_empty() && !right.starts_with(' ');
+
+            let left_styled = if left.is_empty() {
+                String::new()
+            } else if is_header {
+                format!("{}", self.theme.cyan(left))
+            } else {
+                format!("{}", self.theme.dim(left))
+            };
+            let right_styled = if right.is_empty() {
+                String::new()
+            } else if is_right_header {
+                format!("{}", self.theme.cyan(right))
+            } else {
+                format!("{}", self.theme.dim(right))
+            };
+
+            // Pad left to `col_width` visible columns so right column lines up.
+            let left_pad = col_width.saturating_sub(visible_len(&left_styled));
+            out.push(format!("  {left_styled}{:left_pad$}{right_styled}", ""));
+        }
+
+        out.push(String::new());
+        out.push(format!("  {}", self.theme.dim("press any key to dismiss")));
+        out
     }
 
     /// Moves the diagnostic cursor for the current step by `delta`, wrapping
@@ -835,11 +894,20 @@ impl TtyDisplay {
                 all_lines.push((String::new(), 1));
                 cumulative += 1;
             }
-            let help = "  j/k ↑/↓  nav · Enter/o  toggle · O  expand · n/p  diag · e  open · r  rerun · f  failed · c  cursor · q  quit";
-            let help_styled = format!("{}", self.theme.dim(help));
-            let r = Self::visual_rows_for(&help_styled, width) as usize;
-            all_lines.push((help_styled, r));
-            cumulative += r;
+            if self.help_modal_active {
+                for line in self.help_modal_lines() {
+                    let r = Self::visual_rows_for(&line, width) as usize;
+                    all_lines.push((line, r));
+                    cumulative += r;
+                }
+            } else {
+                // Option B: grouped, symbol-led, fits ~80 cols.
+                let help = "  ↕ j/k   ⏎ toggle   ▸ n/p/e   ↺ r/f/c   ? help · q quit";
+                let help_styled = format!("{}", self.theme.dim(help));
+                let r = Self::visual_rows_for(&help_styled, width) as usize;
+                all_lines.push((help_styled, r));
+                cumulative += r;
+            }
 
             if let Some(msg) = &self.transient_message {
                 let line = format!("  {}", self.theme.yellow(msg));
@@ -1001,6 +1069,7 @@ impl Display for TtyDisplay {
         self.hook_running = false;
         self.parsed_diagnostics = vec![Vec::new(); step_names.len()];
         self.current_diagnostic = vec![0; step_names.len()];
+        self.help_modal_active = false;
 
         // Stash trigger BEFORE moving the value into the divider, so
         // `run_finished` can detect "file change → zero steps matched".
@@ -1213,6 +1282,15 @@ impl Display for TtyDisplay {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> BrowseAction {
+        // Modal capture: while the `?` help is up, any key dismisses it and
+        // does nothing else — the key isn't forwarded to normal handling so
+        // users don't accidentally rerun or quit while reading the keys.
+        if self.help_modal_active {
+            self.help_modal_active = false;
+            self.last_key = None;
+            return BrowseAction::Redraw;
+        }
+
         let n = self.step_names.len();
         if n == 0 {
             return if matches!(key.code, KeyCode::Char('q')) {
@@ -1316,6 +1394,11 @@ impl Display for TtyDisplay {
             KeyCode::Char('e') => {
                 self.last_key = None;
                 self.open_current_diagnostic();
+                BrowseAction::Redraw
+            }
+            KeyCode::Char('?') => {
+                self.last_key = None;
+                self.help_modal_active = true;
                 BrowseAction::Redraw
             }
             KeyCode::Char('q') => BrowseAction::Quit,
@@ -1476,6 +1559,27 @@ mod tests {
             recorded[3],
             (std::path::PathBuf::from("/tmp/repo/b.rs"), 2, Some(2))
         );
+    }
+
+    /// `?` opens the help modal; any subsequent key dismisses it without
+    /// forwarding the keypress to the normal handlers (so the user can read
+    /// the keys without accidentally rerunning or quitting).
+    #[test]
+    fn help_modal_opens_on_question_mark_and_dismisses_on_any_key() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["step".to_string()]);
+        assert!(!d.help_modal_active);
+
+        d.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(d.help_modal_active, "? should open the modal");
+
+        // Pressing `q` while the modal is up should dismiss it instead of
+        // quitting — that's the modal-capture guarantee.
+        let action = d.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(matches!(action, BrowseAction::Redraw));
+        assert!(!d.help_modal_active, "any key should dismiss the modal");
     }
 
     /// `e` on a step with no diagnostics surfaces a transient message and
