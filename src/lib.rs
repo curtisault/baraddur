@@ -368,6 +368,13 @@ impl App {
                                         rerun_filter = last_failed_steps.clone();
                                         continue 'main;
                                     }
+                                    BrowseAction::RerunCursor(name) => {
+                                        if let Some(h) = hook_handle.take() { h.abort(); display.hook_finished(); }
+                                        display.exit_browse_mode();
+                                        trigger_paths = None;
+                                        rerun_filter = Some(vec![name]);
+                                        continue 'main;
+                                    }
                                 },
                                 None => {
                                     display.exit_browse_mode();

@@ -682,7 +682,7 @@ impl TtyDisplay {
                 all_lines.push((String::new(), 1));
                 cumulative += 1;
             }
-            let help = "  j/k ↑/↓  nav · Enter/o  toggle · O  expand all · r  rerun · f  rerun failed · q  quit";
+            let help = "  j/k ↑/↓  nav · Enter/o  toggle · O  expand all · r  rerun · f  rerun failed · c  rerun cursor · q  quit";
             all_lines.push((format!("{}", self.theme.dim(help)), 1));
             cumulative += 2;
 
@@ -1115,6 +1115,14 @@ impl Display for TtyDisplay {
                     BrowseAction::Redraw
                 }
             }
+            KeyCode::Char('c') => {
+                self.last_key = None;
+                // Rerun the step under the cursor in isolation. Always
+                // emitted — a skipped step runs alone (matches "rerun
+                // exactly what you pointed at"), and a passing step reruns
+                // freshly which is useful after edits.
+                BrowseAction::RerunCursor(self.step_names[self.cursor].clone())
+            }
             KeyCode::Char('q') => BrowseAction::Quit,
             _ => {
                 // Any unrecognized key clears the pending `g` chord.
@@ -1175,6 +1183,26 @@ mod tests {
             after.local_modes.contains(LocalModes::ECHO),
             "ECHO should be restored after restore()"
         );
+    }
+
+    /// Pressing `c` in browse mode returns `RerunCursor` carrying the name
+    /// of the step under the cursor. Verifies the third rerun key alongside
+    /// `r` (full) and `f` (failed).
+    #[test]
+    fn handle_key_c_returns_rerun_cursor_for_step_under_cursor() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        // Populate step list via the normal lifecycle so internal vectors are
+        // sized correctly. Cursor lands at index 0 by default.
+        d.run_started(&["alpha".to_string(), "beta".to_string(), "gamma".to_string()]);
+        d.cursor = 1;
+
+        let action = d.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        match action {
+            BrowseAction::RerunCursor(name) => assert_eq!(name, "beta"),
+            other => panic!("expected RerunCursor(\"beta\"), got {other:?}"),
+        }
     }
 
     /// restore_signals_and_output must turn OPOST and ISIG back on, even if
