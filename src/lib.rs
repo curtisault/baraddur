@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod git;
 pub mod output;
 pub mod pipeline;
 pub mod watcher;
@@ -29,10 +30,15 @@ pub struct App {
 }
 
 /// Options for a one-shot `App::run_once` invocation.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct RunOnceOptions {
     /// Skip the configured `[on_failure]` hook even if enabled.
     pub no_hook: bool,
+
+    /// Initial trigger paths (relative to `App.root`). When `Some`, the
+    /// pipeline filters steps by `if_changed` and substitutes `{files}`
+    /// exactly as watch-mode does on a file-change. `None` runs every step.
+    pub initial_trigger: Option<Vec<PathBuf>>,
 }
 
 impl App {
@@ -74,9 +80,19 @@ impl App {
 
         display.banner(&self.root, &self.config_path, self.config.steps.len());
 
-        let results =
-            pipeline::run_pipeline(&self.config, &self.root, display.as_mut(), None, None, None)
-                .await?;
+        if let Some(paths) = opts.initial_trigger.as_deref() {
+            display.set_trigger(paths);
+        }
+
+        let results = pipeline::run_pipeline(
+            &self.config,
+            &self.root,
+            display.as_mut(),
+            None,
+            opts.initial_trigger.as_deref(),
+            None,
+        )
+        .await?;
 
         write_run_log(&self.root, &results);
 

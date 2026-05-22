@@ -4,6 +4,7 @@
 //! Uses `run_until` instead of `run` so the test can inject a shutdown future
 //! without sending SIGINT to the test runner.
 
+use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -168,6 +169,92 @@ async fn run_once_returns_success_on_passing_pipeline() {
     let contents = std::fs::read_to_string(&log).unwrap();
     assert!(contents.contains("noop"));
     assert!(contents.contains("pass"));
+}
+
+/// `run_once` with an `initial_trigger` drawn from `git diff --cached`
+/// applies `if_changed` filtering exactly like watch mode: only steps whose
+/// globs match the staged paths should run. End-to-end through a real git
+/// repo so the staged-paths discovery is exercised, not mocked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_once_with_staged_paths_filters_step_subset() {
+    let td = TempDir::new().unwrap();
+    let root = td.path().to_path_buf();
+
+    git(&root, &["init", "-q"]);
+    git(&root, &["config", "user.email", "test@example.com"]);
+    git(&root, &["config", "user.name", "test"]);
+
+    std::fs::write(root.join("foo.rs"), "fn x() {}\n").unwrap();
+    std::fs::write(root.join("notes.md"), "# notes\n").unwrap();
+    git(&root, &["add", "foo.rs"]);
+
+    let staged = baraddur::git::staged_paths(&root).await.unwrap();
+    assert_eq!(staged, vec![PathBuf::from("foo.rs")]);
+
+    let app = App {
+        config: Config {
+            watch: WatchConfig {
+                extensions: vec!["rs".into()],
+                debounce_ms: 100,
+                ignore: vec![],
+            },
+            output: OutputConfig::default(),
+            on_failure: OnFailureConfig::default(),
+            steps: vec![
+                Step {
+                    name: "rust".into(),
+                    cmd: "true".into(),
+                    parallel: false,
+                    if_changed: vec!["**/*.rs".into()],
+                },
+                Step {
+                    name: "docs".into(),
+                    cmd: "true".into(),
+                    parallel: false,
+                    if_changed: vec!["**/*.md".into()],
+                },
+            ],
+        },
+        config_path: root.join(".baraddur.toml"),
+        root: root.clone(),
+        display_config: DisplayConfig {
+            is_tty: false,
+            no_clear: true,
+            verbosity: Verbosity::Quiet,
+        },
+    };
+
+    let success = app
+        .run_once(RunOnceOptions {
+            no_hook: false,
+            initial_trigger: Some(staged),
+        })
+        .await
+        .unwrap();
+    assert!(success);
+
+    let log = std::fs::read_to_string(root.join(".baraddur").join("last-run.log")).unwrap();
+    assert!(
+        log.contains("rust"),
+        "expected `rust` step to run; log:\n{log}"
+    );
+    assert!(
+        !log.contains("docs"),
+        "expected `docs` step to be filtered out; log:\n{log}"
+    );
+}
+
+fn git(cwd: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap_or_else(|e| panic!("git {args:?} failed to spawn: {e}"));
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// A one-shot `run_once` against a failing pipeline returns `Ok(false)` and

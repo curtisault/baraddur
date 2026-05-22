@@ -58,6 +58,17 @@ enum Command {
         /// Skip the configured `[on_failure]` hook even if enabled.
         #[arg(long)]
         no_hook: bool,
+
+        /// Restrict the pipeline to files currently staged for commit
+        /// (`git diff --cached`). Mutually exclusive with `--since`.
+        #[arg(long, conflicts_with = "since")]
+        staged: bool,
+
+        /// Restrict the pipeline to files that changed since the given
+        /// git ref (`git diff <ref>...HEAD`, plus untracked-not-ignored).
+        /// Mutually exclusive with `--staged`.
+        #[arg(long, value_name = "REF", conflicts_with = "staged")]
+        since: Option<String>,
     },
 }
 
@@ -96,14 +107,31 @@ async fn main() -> ExitCode {
     };
 
     match cli.command {
-        Some(Command::Check { no_hook }) => match app.run_once(RunOnceOptions { no_hook }).await {
-            Ok(true) => ExitCode::SUCCESS,
-            Ok(false) => ExitCode::from(1),
-            Err(e) => {
-                eprintln!("baraddur: {e:#}");
-                ExitCode::from(1)
+        Some(Command::Check {
+            no_hook,
+            staged,
+            since,
+        }) => {
+            let initial_trigger = match resolve_trigger(&app.root, staged, since.as_deref()).await {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("baraddur: {e:#}");
+                    return ExitCode::from(1);
+                }
+            };
+            let opts = RunOnceOptions {
+                no_hook,
+                initial_trigger,
+            };
+            match app.run_once(opts).await {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => ExitCode::from(1),
+                Err(e) => {
+                    eprintln!("baraddur: {e:#}");
+                    ExitCode::from(1)
+                }
             }
-        },
+        }
         Some(Command::Init) => unreachable!("handled above"),
         None => match app.run().await {
             Ok(()) => ExitCode::SUCCESS,
@@ -113,6 +141,39 @@ async fn main() -> ExitCode {
             }
         },
     }
+}
+
+/// Resolves `--staged` / `--since` into a list of paths relative to
+/// `app_root`. Returns `Ok(None)` when neither flag is set, so the pipeline
+/// runs unfiltered.
+async fn resolve_trigger(
+    app_root: &std::path::Path,
+    staged: bool,
+    since: Option<&str>,
+) -> anyhow::Result<Option<Vec<PathBuf>>> {
+    if !staged && since.is_none() {
+        return Ok(None);
+    }
+
+    use anyhow::Context as _;
+    let repo = baraddur::git::repo_root(app_root).await?;
+    let app_root_canon = app_root
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {}", app_root.display()))?;
+
+    let raw = if staged {
+        baraddur::git::staged_paths(&repo).await?
+    } else {
+        // `conflicts_with` keeps these mutually exclusive; the else branch
+        // is reached only when `since` is `Some`.
+        baraddur::git::diff_since(&repo, since.expect("since is Some")).await?
+    };
+
+    Ok(Some(baraddur::git::rebase_for_app(
+        &repo,
+        &app_root_canon,
+        &raw,
+    )))
 }
 
 enum BuildAppError {
