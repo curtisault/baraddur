@@ -70,6 +70,30 @@ enum Command {
         #[arg(long, value_name = "REF", conflicts_with = "staged")]
         since: Option<String>,
     },
+
+    /// Run the pipeline; on success, exec the wrapped command.
+    ///
+    /// Everything after `gate` is captured as the wrapped command, so no
+    /// `--` separator is needed: `baraddur gate git push origin main`.
+    /// Exit code is the wrapped command's on success, 1 on pipeline failure,
+    /// 2 on config error.
+    Gate {
+        /// Skip the configured `[on_failure]` hook even if enabled.
+        #[arg(long)]
+        no_hook: bool,
+
+        /// Restrict the pipeline to files currently staged for commit.
+        #[arg(long, conflicts_with = "since")]
+        staged: bool,
+
+        /// Restrict the pipeline to files changed since the given git ref.
+        #[arg(long, value_name = "REF", conflicts_with = "staged")]
+        since: Option<String>,
+
+        /// The command (and arguments) to execute on pipeline success.
+        #[arg(trailing_var_arg = true, required = true, num_args = 1..)]
+        wrapped: Vec<String>,
+    },
 }
 
 impl Cli {
@@ -126,6 +150,31 @@ async fn main() -> ExitCode {
             match app.run_once(opts).await {
                 Ok(true) => ExitCode::SUCCESS,
                 Ok(false) => ExitCode::from(1),
+                Err(e) => {
+                    eprintln!("baraddur: {e:#}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Some(Command::Gate {
+            no_hook,
+            staged,
+            since,
+            wrapped,
+        }) => {
+            let initial_trigger = match resolve_trigger(&app.root, staged, since.as_deref()).await {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("baraddur: {e:#}");
+                    return ExitCode::from(1);
+                }
+            };
+            let opts = RunOnceOptions {
+                no_hook,
+                initial_trigger,
+            };
+            match app.gate(wrapped, opts).await {
+                Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
                 Err(e) => {
                     eprintln!("baraddur: {e:#}");
                     ExitCode::from(1)

@@ -110,6 +110,33 @@ impl App {
         Ok(success)
     }
 
+    /// Runs the pipeline once; if it passes, executes `wrapped` (replacing
+    /// the current process on Unix, spawn+wait on Windows). Returns the exit
+    /// code to surface from `baraddur gate`.
+    ///
+    /// Empty trigger (e.g. `--staged` with nothing staged) skips the pipeline
+    /// and execs immediately — there's nothing to verify.
+    ///
+    /// The configured `[on_failure]` hook timeout is clamped to 15s for gate
+    /// so the gate fails fast (vs the watch-mode default of 30s).
+    pub async fn gate(mut self, wrapped: Vec<String>, opts: RunOnceOptions) -> Result<i32> {
+        if wrapped.is_empty() {
+            anyhow::bail!("gate: no command provided");
+        }
+
+        let skip_pipeline = matches!(&opts.initial_trigger, Some(paths) if paths.is_empty());
+
+        if !skip_pipeline {
+            self.config.on_failure.timeout_secs = self.config.on_failure.timeout_secs.min(15);
+            let success = self.run_once(opts).await?;
+            if !success {
+                return Ok(1);
+            }
+        }
+
+        exec_wrapped(&wrapped)
+    }
+
     /// Runs the watch loop until either `stop` resolves or the watcher dies.
     /// Exposed so tests can drive the loop without sending SIGINT to the test runner.
     // `last_failed_steps` is initialized to None as a placeholder; the first
@@ -504,6 +531,34 @@ fn rel_paths(paths: &[PathBuf], root: &Path) -> Vec<PathBuf> {
         .iter()
         .map(|p| p.strip_prefix(root).unwrap_or(p).to_path_buf())
         .collect()
+}
+
+/// Replaces the current process with `args` on Unix; spawns+waits on
+/// Windows. Returns the exit code only on Windows or when exec fails — on
+/// Unix the successful path never returns.
+fn exec_wrapped(args: &[String]) -> Result<i32> {
+    let (program, rest) = args
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("no command provided"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // `exec` only returns when it fails — on success the process image
+        // is replaced and this function never returns.
+        let err = std::process::Command::new(program).args(rest).exec();
+        Err(anyhow::Error::new(err).context(format!("exec `{program}`")))
+    }
+
+    #[cfg(not(unix))]
+    {
+        use anyhow::Context as _;
+        let status = std::process::Command::new(program)
+            .args(rest)
+            .status()
+            .with_context(|| format!("spawning `{program}`"))?;
+        Ok(status.code().unwrap_or(1))
+    }
 }
 
 enum RunOutcome {
