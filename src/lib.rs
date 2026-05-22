@@ -28,6 +28,13 @@ pub struct App {
     pub display_config: DisplayConfig,
 }
 
+/// Options for a one-shot `App::run_once` invocation.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RunOnceOptions {
+    /// Skip the configured `[on_failure]` hook even if enabled.
+    pub no_hook: bool,
+}
+
 impl App {
     /// Convenience wrapper that uses Ctrl+C as the shutdown signal.
     /// Production entry point.
@@ -36,6 +43,55 @@ impl App {
             let _ = tokio::signal::ctrl_c().await;
         };
         self.run_until(stop).await
+    }
+
+    /// Constructs the display the watch loop uses based on `display_config`.
+    /// `TtyDisplay` when attached to a terminal, `PlainDisplay` otherwise.
+    fn build_display(&self) -> Box<dyn Display> {
+        let dc = &self.display_config;
+        let color = should_color(dc.is_tty);
+        if dc.is_tty {
+            Box::new(TtyDisplay::new(
+                Theme::new(color),
+                dc.verbosity,
+                dc.no_clear,
+            ))
+        } else {
+            Box::new(PlainDisplay::new(Theme::new(color), dc.verbosity))
+        }
+    }
+
+    /// Runs the configured pipeline exactly once and returns whether every
+    /// step passed. Uses `PlainDisplay` unconditionally (no spinner, no browse
+    /// mode) so output is scriptable. Writes `.baraddur/last-run.log` and,
+    /// unless `opts.no_hook`, runs the configured `[on_failure]` hook
+    /// synchronously when the run fails.
+    pub async fn run_once(self, opts: RunOnceOptions) -> Result<bool> {
+        let dc = &self.display_config;
+        let color = should_color(dc.is_tty);
+        let mut display: Box<dyn Display> =
+            Box::new(PlainDisplay::new(Theme::new(color), dc.verbosity));
+
+        display.banner(&self.root, &self.config_path, self.config.steps.len());
+
+        let results =
+            pipeline::run_pipeline(&self.config, &self.root, display.as_mut(), None, None, None)
+                .await?;
+
+        write_run_log(&self.root, &results);
+
+        let success = results.iter().all(|r| r.success);
+
+        if !success && !opts.no_hook && self.config.on_failure.enabled {
+            display.hook_started();
+            let combined = pipeline::combine_failed_output(&results);
+            match pipeline::run_hook(&self.config.on_failure, &self.root, &combined).await {
+                Ok(Some(text)) => display.hook_output(&text),
+                _ => display.hook_finished(),
+            }
+        }
+
+        Ok(success)
     }
 
     /// Runs the watch loop until either `stop` resolves or the watcher dies.
@@ -51,7 +107,6 @@ impl App {
     {
         tokio::pin!(stop);
         let dc = &self.display_config;
-        let color = should_color(dc.is_tty);
 
         let spinner_interval = if dc.is_tty {
             Some(Duration::from_millis(80))
@@ -59,15 +114,7 @@ impl App {
             None
         };
 
-        let mut display: Box<dyn Display> = if dc.is_tty {
-            Box::new(TtyDisplay::new(
-                Theme::new(color),
-                dc.verbosity,
-                dc.no_clear,
-            ))
-        } else {
-            Box::new(PlainDisplay::new(Theme::new(color), dc.verbosity))
-        };
+        let mut display: Box<dyn Display> = self.build_display();
 
         // Show startup banner once before the first run.
         display.banner(&self.root, &self.config_path, self.config.steps.len());

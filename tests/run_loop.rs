@@ -8,6 +8,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use baraddur::App;
+use baraddur::RunOnceOptions;
 use baraddur::config::{Config, OnFailureConfig, OutputConfig, Step, WatchConfig};
 use baraddur::output::{DisplayConfig, Verbosity};
 
@@ -139,6 +140,57 @@ async fn run_until_records_failures() {
         contents.contains("FAIL"),
         "log should mark the step as failing; got:\n{contents}"
     );
+}
+
+/// A one-shot `run_once` against a passing pipeline returns `Ok(true)` and
+/// writes the standard run log.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_once_returns_success_on_passing_pipeline() {
+    let td = TempDir::new().unwrap();
+    let root = td.path().to_path_buf();
+    let app = trivial_app(&td, "true");
+
+    let success = tokio::time::timeout(
+        Duration::from_secs(5),
+        app.run_once(RunOnceOptions::default()),
+    )
+    .await
+    .expect("run_once did not return within 5s")
+    .expect("run_once returned an error");
+
+    assert!(
+        success,
+        "run_once should return true for a passing pipeline"
+    );
+
+    let log = root.join(".baraddur").join("last-run.log");
+    assert!(log.exists(), "expected {} to exist", log.display());
+    let contents = std::fs::read_to_string(&log).unwrap();
+    assert!(contents.contains("noop"));
+    assert!(contents.contains("pass"));
+}
+
+/// A one-shot `run_once` against a failing pipeline returns `Ok(false)` and
+/// records the failure in the log.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_once_returns_failure_on_failing_step() {
+    let td = TempDir::new().unwrap();
+    let root = td.path().to_path_buf();
+    let app = trivial_app(&td, "false");
+
+    let success = tokio::time::timeout(
+        Duration::from_secs(5),
+        app.run_once(RunOnceOptions::default()),
+    )
+    .await
+    .expect("run_once did not return within 5s")
+    .expect("run_once returned an error");
+
+    assert!(!success, "run_once should return false when a step fails");
+
+    let log = root.join(".baraddur").join("last-run.log");
+    let contents = std::fs::read_to_string(&log).unwrap();
+    assert!(contents.contains("FAIL"));
 }
 
 /// The loop must surrender control quickly enough that an immediate stop
