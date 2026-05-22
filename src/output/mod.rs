@@ -21,6 +21,7 @@ pub struct DisplayConfig {
 }
 
 /// Returned by `Display::handle_key` to tell the caller what to do next.
+#[derive(Debug)]
 pub enum BrowseAction {
     /// Key was consumed but no visual change is needed.
     Noop,
@@ -35,6 +36,10 @@ pub enum BrowseAction {
     /// steps that failed in the previous run. Display returns this only if
     /// at least one step in the current view was marked Failed.
     RerunFailed,
+    /// User pressed `c`; caller should exit browse mode and rerun only the
+    /// single step under the cursor. The name is carried so the main loop
+    /// can drop it straight into `rerun_filter`.
+    RerunCursor(String),
 }
 
 /// Sink for pipeline lifecycle events.
