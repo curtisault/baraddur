@@ -92,3 +92,55 @@ fn gate_propagates_wrapped_exit_code() {
         "expected wrapped exit code to propagate"
     );
 }
+
+/// `gate --staged` with nothing staged short-circuits: the pipeline is skipped
+/// and the wrapped command runs immediately. Proven by configuring a step that
+/// would *fail* if it ran — if exec happens, we know the pipeline was skipped.
+#[test]
+fn gate_staged_empty_skips_pipeline_and_execs() {
+    let td = TempDir::new().unwrap();
+    let root = td.path();
+    // A failing step would normally block exec. The test only passes if the
+    // empty-staged short-circuit fires before `false` runs.
+    write_config(root, "false");
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "test@example.com"]);
+    git(root, &["config", "user.name", "test"]);
+
+    let sentinel = root.join("sentinel.txt");
+    let status = baraddur()
+        .args(["gate", "--staged", "touch"])
+        .arg(&sentinel)
+        .current_dir(root)
+        .status()
+        .unwrap();
+
+    assert!(
+        status.success(),
+        "expected gate to short-circuit and exec; got {status:?}"
+    );
+    assert!(
+        sentinel.exists(),
+        "wrapped command did not run despite empty staged list"
+    );
+    // Pipeline skipped → run log should not exist.
+    let log = root.join(".baraddur").join("last-run.log");
+    assert!(
+        !log.exists(),
+        "expected pipeline to be skipped, but found {}",
+        log.display()
+    );
+}
+
+fn git(cwd: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap_or_else(|e| panic!("git {args:?} failed to spawn: {e}"));
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

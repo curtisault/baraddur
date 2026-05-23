@@ -257,6 +257,135 @@ fn git(cwd: &std::path::Path, args: &[&str]) {
     );
 }
 
+fn git_stdout(cwd: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap_or_else(|e| panic!("git {args:?} failed to spawn: {e}"));
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// `run_once` must run the configured `[on_failure]` hook when the pipeline
+/// fails — mirroring watch-mode behavior. The hook runs synchronously here
+/// (unlike watch mode's async-detached hook), so the call returns only after
+/// the hook completes. `tee` captures stdin to a file so we can verify the
+/// failed-step output reached the hook.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_once_runs_on_failure_hook() {
+    let td = TempDir::new().unwrap();
+    let root = td.path().to_path_buf();
+    let sentinel = root.join("hook-input.txt");
+
+    let mut app = trivial_app(&td, "false");
+    app.config.on_failure = OnFailureConfig {
+        enabled: true,
+        cmd: format!("tee {}", sentinel.display()),
+        prompt: "PROMPT_LINE".into(),
+        timeout_secs: 5,
+    };
+
+    let success = tokio::time::timeout(
+        Duration::from_secs(10),
+        app.run_once(RunOnceOptions::default()),
+    )
+    .await
+    .expect("run_once did not return within 10s")
+    .expect("run_once returned an error");
+
+    assert!(!success);
+
+    let captured = std::fs::read_to_string(&sentinel)
+        .unwrap_or_else(|_| panic!("expected hook to write {}", sentinel.display()));
+    assert!(
+        captured.contains("PROMPT_LINE"),
+        "hook stdin missing prompt prefix; got:\n{captured}"
+    );
+    assert!(
+        captured.contains("noop"),
+        "hook stdin missing failed step name; got:\n{captured}"
+    );
+}
+
+/// `RunOnceOptions::no_hook = true` must skip the hook even when
+/// `on_failure.enabled` is true. The sentinel file's absence proves the hook
+/// did not run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_once_no_hook_skips_on_failure_hook() {
+    let td = TempDir::new().unwrap();
+    let root = td.path().to_path_buf();
+    let sentinel = root.join("hook-input.txt");
+
+    let mut app = trivial_app(&td, "false");
+    app.config.on_failure = OnFailureConfig {
+        enabled: true,
+        cmd: format!("tee {}", sentinel.display()),
+        prompt: "PROMPT_LINE".into(),
+        timeout_secs: 5,
+    };
+
+    let success = tokio::time::timeout(
+        Duration::from_secs(10),
+        app.run_once(RunOnceOptions {
+            no_hook: true,
+            initial_trigger: None,
+        }),
+    )
+    .await
+    .expect("run_once did not return within 10s")
+    .expect("run_once returned an error");
+
+    assert!(!success);
+    assert!(
+        !sentinel.exists(),
+        "hook ran despite no_hook = true: {} exists",
+        sentinel.display()
+    );
+}
+
+/// `git::diff_since` reports both committed changes since `base` AND
+/// untracked-but-not-ignored files. `.gitignore`d paths must be excluded so
+/// build artifacts don't trigger steps.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn diff_since_includes_committed_changes_and_untracked_but_not_ignored() {
+    let td = TempDir::new().unwrap();
+    let root = td.path().to_path_buf();
+
+    git(&root, &["init", "-q"]);
+    git(&root, &["config", "user.email", "test@example.com"]);
+    git(&root, &["config", "user.name", "test"]);
+
+    // Baseline commit: one tracked file, plus a .gitignore.
+    std::fs::write(root.join(".gitignore"), "ignored.rs\n").unwrap();
+    std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+    git(&root, &["add", ".gitignore", "a.rs"]);
+    git(&root, &["commit", "-q", "-m", "baseline"]);
+    // Capture baseline by SHA — `"HEAD"` would move with the next commit.
+    let baseline = git_stdout(&root, &["rev-parse", "HEAD"]);
+    let baseline = baseline.trim();
+
+    // After the baseline: modify a tracked file (new commit), add an
+    // untracked file, and add an untracked-but-ignored file.
+    std::fs::write(root.join("a.rs"), "fn a() { let _ = 1; }\n").unwrap();
+    git(&root, &["commit", "-q", "-am", "modify a"]);
+    std::fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
+    std::fs::write(root.join("ignored.rs"), "fn ignored() {}\n").unwrap();
+
+    let mut paths = baraddur::git::diff_since(&root, baseline).await.unwrap();
+    paths.sort();
+
+    assert_eq!(
+        paths,
+        vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")],
+        "expected committed-change `a.rs` + untracked `b.rs`; `ignored.rs` must be excluded"
+    );
+}
+
 /// A one-shot `run_once` against a failing pipeline returns `Ok(false)` and
 /// records the failure in the log.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
