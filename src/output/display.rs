@@ -840,15 +840,21 @@ impl TtyDisplay {
                     let diag_idx = crate::output::diagnostic::extract_line(raw)
                         .and_then(|d| diags.iter().position(|x| x == &d));
                     let (display_line, r) = if let Some(idx) = diag_idx {
-                        let styled = if is_cursor_step && idx == current {
-                            // Current diagnostic: cyan marker + cyan underlined
-                            // body. Underlining the row makes the selection
-                            // immediately obvious even when the marker is dim.
-                            format!(
-                                "{} {}",
-                                self.theme.cyan("▸"),
-                                self.theme.cyan_underline(raw)
-                            )
+                        let is_current = is_cursor_step && idx == current;
+                        let styled = if is_current {
+                            // Color: cyan marker + cyan underlined body.
+                            // NO_COLOR: distinct `▶` glyph stands in for the
+                            // underline, matching the cursor-row fallback at
+                            // the step-list level.
+                            if self.theme.color_enabled() {
+                                format!(
+                                    "{} {}",
+                                    self.theme.cyan("▸"),
+                                    self.theme.cyan_underline(raw)
+                                )
+                            } else {
+                                format!("▶ {raw}")
+                            }
                         } else {
                             format!("{} {raw}", self.theme.dim("▸"))
                         };
