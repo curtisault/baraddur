@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod git;
 pub mod output;
 pub mod pipeline;
 pub mod watcher;
@@ -28,6 +29,18 @@ pub struct App {
     pub display_config: DisplayConfig,
 }
 
+/// Options for a one-shot `App::run_once` invocation.
+#[derive(Debug, Default, Clone)]
+pub struct RunOnceOptions {
+    /// Skip the configured `[on_failure]` hook even if enabled.
+    pub no_hook: bool,
+
+    /// Initial trigger paths (relative to `App.root`). When `Some`, the
+    /// pipeline filters steps by `if_changed` and substitutes `{files}`
+    /// exactly as watch-mode does on a file-change. `None` runs every step.
+    pub initial_trigger: Option<Vec<PathBuf>>,
+}
+
 impl App {
     /// Convenience wrapper that uses Ctrl+C as the shutdown signal.
     /// Production entry point.
@@ -36,6 +49,92 @@ impl App {
             let _ = tokio::signal::ctrl_c().await;
         };
         self.run_until(stop).await
+    }
+
+    /// Constructs the display the watch loop uses based on `display_config`.
+    /// `TtyDisplay` when attached to a terminal, `PlainDisplay` otherwise.
+    fn build_display(&self) -> Box<dyn Display> {
+        let dc = &self.display_config;
+        let color = should_color(dc.is_tty);
+        if dc.is_tty {
+            Box::new(TtyDisplay::new(
+                Theme::new(color),
+                dc.verbosity,
+                dc.no_clear,
+            ))
+        } else {
+            Box::new(PlainDisplay::new(Theme::new(color), dc.verbosity))
+        }
+    }
+
+    /// Runs the configured pipeline exactly once and returns whether every
+    /// step passed. Uses `PlainDisplay` unconditionally (no spinner, no browse
+    /// mode) so output is scriptable. Writes `.baraddur/last-run.log` and,
+    /// unless `opts.no_hook`, runs the configured `[on_failure]` hook
+    /// synchronously when the run fails.
+    pub async fn run_once(self, opts: RunOnceOptions) -> Result<bool> {
+        let dc = &self.display_config;
+        let color = should_color(dc.is_tty);
+        let mut display: Box<dyn Display> =
+            Box::new(PlainDisplay::new(Theme::new(color), dc.verbosity));
+
+        display.banner(&self.root, &self.config_path, self.config.steps.len());
+
+        if let Some(paths) = opts.initial_trigger.as_deref() {
+            display.set_trigger(paths);
+        }
+
+        let results = pipeline::run_pipeline(
+            &self.config,
+            &self.root,
+            display.as_mut(),
+            None,
+            opts.initial_trigger.as_deref(),
+            None,
+        )
+        .await?;
+
+        write_run_log(&self.root, &results);
+
+        let success = results.iter().all(|r| r.success);
+
+        if !success && !opts.no_hook && self.config.on_failure.enabled {
+            display.hook_started();
+            let combined = pipeline::combine_failed_output(&results);
+            match pipeline::run_hook(&self.config.on_failure, &self.root, &combined).await {
+                Ok(Some(text)) => display.hook_output(&text),
+                _ => display.hook_finished(),
+            }
+        }
+
+        Ok(success)
+    }
+
+    /// Runs the pipeline once; if it passes, executes `wrapped` (replacing
+    /// the current process on Unix, spawn+wait on Windows). Returns the exit
+    /// code to surface from `baraddur gate`.
+    ///
+    /// Empty trigger (e.g. `--staged` with nothing staged) skips the pipeline
+    /// and execs immediately — there's nothing to verify.
+    ///
+    /// The configured `[on_failure]` hook timeout is clamped to 15s for gate
+    /// so the gate fails fast (vs the watch-mode default of 30s).
+    pub async fn gate(mut self, wrapped: Vec<String>, opts: RunOnceOptions) -> Result<i32> {
+        if wrapped.is_empty() {
+            anyhow::bail!("gate: no command provided");
+        }
+
+        let skip_pipeline = matches!(&opts.initial_trigger, Some(paths) if paths.is_empty());
+
+        if !skip_pipeline {
+            self.config.on_failure.timeout_secs = self.config.on_failure.timeout_secs.min(15);
+            let success = self.run_once(opts).await?;
+            if !success {
+                return Ok(1);
+            }
+        }
+
+        exec_wrapped(&wrapped)
     }
 
     /// Runs the watch loop until either `stop` resolves or the watcher dies.
@@ -51,7 +150,6 @@ impl App {
     {
         tokio::pin!(stop);
         let dc = &self.display_config;
-        let color = should_color(dc.is_tty);
 
         let spinner_interval = if dc.is_tty {
             Some(Duration::from_millis(80))
@@ -59,15 +157,7 @@ impl App {
             None
         };
 
-        let mut display: Box<dyn Display> = if dc.is_tty {
-            Box::new(TtyDisplay::new(
-                Theme::new(color),
-                dc.verbosity,
-                dc.no_clear,
-            ))
-        } else {
-            Box::new(PlainDisplay::new(Theme::new(color), dc.verbosity))
-        };
+        let mut display: Box<dyn Display> = self.build_display();
 
         // Show startup banner once before the first run.
         display.banner(&self.root, &self.config_path, self.config.steps.len());
@@ -441,6 +531,34 @@ fn rel_paths(paths: &[PathBuf], root: &Path) -> Vec<PathBuf> {
         .iter()
         .map(|p| p.strip_prefix(root).unwrap_or(p).to_path_buf())
         .collect()
+}
+
+/// Replaces the current process with `args` on Unix; spawns+waits on
+/// Windows. Returns the exit code only on Windows or when exec fails — on
+/// Unix the successful path never returns.
+fn exec_wrapped(args: &[String]) -> Result<i32> {
+    let (program, rest) = args
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("no command provided"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // `exec` only returns when it fails — on success the process image
+        // is replaced and this function never returns.
+        let err = std::process::Command::new(program).args(rest).exec();
+        Err(anyhow::Error::new(err).context(format!("exec `{program}`")))
+    }
+
+    #[cfg(not(unix))]
+    {
+        use anyhow::Context as _;
+        let status = std::process::Command::new(program)
+            .args(rest)
+            .status()
+            .with_context(|| format!("spawning `{program}`"))?;
+        Ok(status.code().unwrap_or(1))
+    }
 }
 
 enum RunOutcome {
