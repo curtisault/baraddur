@@ -23,6 +23,11 @@ struct Cli {
     #[arg(short = 'c', long, global = true)]
     config: Option<PathBuf>,
 
+    /// Run only the steps in the named profile (defined under `[profiles]`
+    /// in the config). Applies to `watch`, `check`, and `gate`.
+    #[arg(short = 'p', long, global = true, value_name = "NAME")]
+    profile: Option<String>,
+
     /// Directory to watch [default: directory containing the discovered config]
     #[arg(short = 'w', long)]
     watch_dir: Option<PathBuf>,
@@ -247,8 +252,14 @@ fn build_app(cli: &Cli) -> Result<baraddur::App, BuildAppError> {
         },
     };
 
+    let mut config = loaded.config;
+    if let Some(name) = cli.profile.as_deref() {
+        baraddur::apply_profile(&mut config, name)
+            .map_err(|e| BuildAppError::Config(format!("{e}")))?;
+    }
+
     Ok(baraddur::App {
-        config: loaded.config,
+        config,
         config_path: loaded.config_path,
         root,
         display_config: DisplayConfig {
@@ -256,6 +267,7 @@ fn build_app(cli: &Cli) -> Result<baraddur::App, BuildAppError> {
             no_clear,
             verbosity,
         },
+        profile: cli.profile.clone(),
     })
 }
 

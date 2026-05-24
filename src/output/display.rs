@@ -192,9 +192,18 @@ impl Display for PlainDisplay {
         self.trigger_paths = Some(paths.to_vec());
     }
 
-    fn banner(&mut self, root: &Path, config_path: &Path, _step_count: usize) {
+    fn banner(
+        &mut self,
+        root: &Path,
+        config_path: &Path,
+        _step_count: usize,
+        profile: Option<&str>,
+    ) {
+        let profile_suffix = profile
+            .map(|p| format!("\n          (profile: {p})"))
+            .unwrap_or_default();
         eprintln!(
-            "baraddur: watching {}\n          (config: {})",
+            "baraddur: watching {}\n          (config: {}){profile_suffix}",
             root.display(),
             config_path.display(),
         );
@@ -1011,7 +1020,13 @@ impl Display for TtyDisplay {
         self.trigger_paths = Some(paths.to_vec());
     }
 
-    fn banner(&mut self, root: &Path, config_path: &Path, step_count: usize) {
+    fn banner(
+        &mut self,
+        root: &Path,
+        config_path: &Path,
+        step_count: usize,
+        profile: Option<&str>,
+    ) {
         // Capture for editor-jump path resolution before the early-quiet exit
         // so diagnostic paths still resolve even when banner output is muted.
         self.root = root.to_path_buf();
@@ -1041,8 +1056,11 @@ impl Display for TtyDisplay {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let profile_suffix = profile
+            .map(|p| format!("  (profile: {p})"))
+            .unwrap_or_default();
         println!(
-            "{}    {}  ({step_count} steps)",
+            "{}    {}  ({step_count} steps){profile_suffix}",
             self.theme.dim("config:  "),
             config_name
         );
@@ -1504,6 +1522,7 @@ mod tests {
             std::path::Path::new("/tmp/repo"),
             std::path::Path::new("/tmp/repo/.baraddur.toml"),
             1,
+            None,
         );
         d.run_started(&["step".to_string()]);
 

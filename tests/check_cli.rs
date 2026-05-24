@@ -145,3 +145,81 @@ if_changed = ["**/*.md"]
         "docs step should be filtered out; log:\n{log}"
     );
 }
+
+/// `--profile quick` with a 4-step config and a 2-step profile must run
+/// exactly the two named steps, in their declared order.
+#[test]
+fn check_profile_runs_only_named_steps() {
+    let td = TempDir::new().unwrap();
+    let root = td.path();
+
+    std::fs::write(
+        root.join(".baraddur.toml"),
+        r#"
+[watch]
+extensions = ["rs"]
+
+[profiles]
+quick = ["fmt", "check"]
+
+[[steps]]
+name = "fmt"
+cmd = "true"
+
+[[steps]]
+name = "check"
+cmd = "true"
+
+[[steps]]
+name = "clippy"
+cmd = "false"
+
+[[steps]]
+name = "test"
+cmd = "false"
+"#,
+    )
+    .unwrap();
+
+    let status = baraddur()
+        .args(["check", "--profile", "quick"])
+        .current_dir(root)
+        .status()
+        .unwrap();
+
+    assert!(
+        status.success(),
+        "expected exit 0 — failing `clippy`/`test` should be filtered out; got {status:?}"
+    );
+    let log = std::fs::read_to_string(root.join(".baraddur").join("last-run.log")).unwrap();
+    assert!(log.contains("fmt"), "fmt step should run; log:\n{log}");
+    assert!(log.contains("check"), "check step should run; log:\n{log}");
+    assert!(
+        !log.contains("clippy"),
+        "clippy step should be filtered out; log:\n{log}"
+    );
+    assert!(
+        !log.contains("═══ test"),
+        "test step should be filtered out; log:\n{log}"
+    );
+}
+
+/// `--profile <unknown>` is a config error: exit 2.
+#[test]
+fn check_profile_unknown_name_is_config_error() {
+    let td = TempDir::new().unwrap();
+    let root = td.path();
+    write_config(root, "true");
+
+    let status = baraddur()
+        .args(["check", "--profile", "nonexistent"])
+        .current_dir(root)
+        .status()
+        .unwrap();
+
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "expected exit 2 for unknown profile; got {status:?}"
+    );
+}

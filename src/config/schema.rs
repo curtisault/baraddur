@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -13,6 +14,13 @@ pub struct Config {
 
     #[serde(default)]
     pub steps: Vec<Step>,
+
+    /// Named subsets of step names. Selected via `--profile <name>` on the
+    /// CLI; filters `steps` to the listed members at startup, preserving
+    /// declaration order. No magic `default` name — absence of the flag runs
+    /// every step.
+    #[serde(default)]
+    pub profiles: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,6 +217,39 @@ mod tests {
         assert_eq!(cfg.on_failure.cmd, "claude -p");
         assert_eq!(cfg.on_failure.prompt, "summarize");
         assert_eq!(cfg.on_failure.timeout_secs, 45);
+    }
+
+    #[test]
+    fn parses_profiles_table() {
+        let src = r#"
+            [watch]
+            extensions = ["rs"]
+
+            [profiles]
+            quick = ["fmt", "check"]
+            full  = ["fmt", "check", "clippy", "test"]
+
+            [[steps]]
+            name = "fmt"
+            cmd = "true"
+        "#;
+        let cfg: Config = toml::from_str(src).unwrap();
+        assert_eq!(cfg.profiles.len(), 2);
+        assert_eq!(cfg.profiles["quick"], vec!["fmt", "check"]);
+        assert_eq!(cfg.profiles["full"], vec!["fmt", "check", "clippy", "test"]);
+    }
+
+    #[test]
+    fn profiles_default_empty() {
+        let src = r#"
+            [watch]
+            extensions = ["rs"]
+            [[steps]]
+            name = "c"
+            cmd = "true"
+        "#;
+        let cfg: Config = toml::from_str(src).unwrap();
+        assert!(cfg.profiles.is_empty());
     }
 
     #[test]

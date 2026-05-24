@@ -65,6 +65,24 @@ pub fn validate(cfg: &Config) -> Result<(), ValidationErrors> {
         ));
     }
 
+    let step_names: std::collections::HashSet<&str> =
+        cfg.steps.iter().map(|s| s.name.as_str()).collect();
+    for (profile_name, members) in &cfg.profiles {
+        if profile_name.trim().is_empty() {
+            errs.push("profile name is empty".into());
+        }
+        if members.is_empty() {
+            errs.push(format!("profile `{profile_name}` has no members"));
+        }
+        for member in members {
+            if !step_names.contains(member.as_str()) {
+                errs.push(format!(
+                    "profile `{profile_name}` references unknown step `{member}`"
+                ));
+            }
+        }
+    }
+
     if cfg.on_failure.enabled {
         if cfg.on_failure.cmd.trim().is_empty() {
             errs.push("on_failure.enabled = true but on_failure.cmd is empty".into());
@@ -106,6 +124,7 @@ mod tests {
                 parallel: false,
                 if_changed: Vec::new(),
             }],
+            profiles: std::collections::HashMap::new(),
         }
     }
 
@@ -209,6 +228,40 @@ mod tests {
         c.on_failure.enabled = false;
         c.on_failure.cmd = String::new();
         assert!(validate(&c).is_ok());
+    }
+
+    #[test]
+    fn rejects_profile_referencing_unknown_step() {
+        let mut c = base();
+        c.profiles
+            .insert("quick".into(), vec!["x".into(), "ghost".into()]);
+        let err = validate(&c).unwrap_err();
+        let s = err.to_string();
+        assert!(s.contains("profile `quick`"));
+        assert!(s.contains("ghost"));
+    }
+
+    #[test]
+    fn accepts_profile_with_defined_steps() {
+        let mut c = base();
+        c.steps.push(Step {
+            name: "y".into(),
+            cmd: "true".into(),
+            parallel: false,
+            if_changed: Vec::new(),
+        });
+        c.profiles.insert("quick".into(), vec!["x".into()]);
+        c.profiles
+            .insert("full".into(), vec!["x".into(), "y".into()]);
+        assert!(validate(&c).is_ok());
+    }
+
+    #[test]
+    fn rejects_empty_profile() {
+        let mut c = base();
+        c.profiles.insert("quick".into(), vec![]);
+        let err = validate(&c).unwrap_err();
+        assert!(err.to_string().contains("no members"));
     }
 
     #[test]

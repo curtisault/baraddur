@@ -27,6 +27,43 @@ pub struct App {
     pub config_path: PathBuf,
     pub root: PathBuf,
     pub display_config: DisplayConfig,
+    /// Active profile name, set by `--profile <name>`. Purely informational
+    /// at runtime — step filtering already happened via `apply_profile` before
+    /// `App` was constructed. Shown in the watch banner when present.
+    pub profile: Option<String>,
+}
+
+/// Filters `cfg.steps` to the named profile's members, preserving declaration
+/// order. Errors if the profile name isn't defined in `cfg.profiles` or if a
+/// member name references a step that no longer exists (the latter should be
+/// caught by `validate`, but we check defensively).
+///
+/// Composes with `--staged` / `--since` / `if_changed`: this narrows the step
+/// list first, then later path filtering narrows further.
+pub fn apply_profile(cfg: &mut config::Config, profile_name: &str) -> Result<()> {
+    let members = cfg.profiles.get(profile_name).ok_or_else(|| {
+        let mut available: Vec<&String> = cfg.profiles.keys().collect();
+        available.sort();
+        if available.is_empty() {
+            anyhow::anyhow!("profile `{profile_name}` not found (no profiles defined in config)")
+        } else {
+            let list = available
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::anyhow!("profile `{profile_name}` not found (defined: {list})")
+        }
+    })?;
+
+    let wanted: std::collections::HashSet<&str> = members.iter().map(String::as_str).collect();
+    cfg.steps.retain(|s| wanted.contains(s.name.as_str()));
+
+    if cfg.steps.is_empty() {
+        anyhow::bail!("profile `{profile_name}` resolved to zero steps");
+    }
+
+    Ok(())
 }
 
 /// Options for a one-shot `App::run_once` invocation.
@@ -78,7 +115,12 @@ impl App {
         let mut display: Box<dyn Display> =
             Box::new(PlainDisplay::new(Theme::new(color), dc.verbosity));
 
-        display.banner(&self.root, &self.config_path, self.config.steps.len());
+        display.banner(
+            &self.root,
+            &self.config_path,
+            self.config.steps.len(),
+            self.profile.as_deref(),
+        );
 
         if let Some(paths) = opts.initial_trigger.as_deref() {
             display.set_trigger(paths);
@@ -160,7 +202,12 @@ impl App {
         let mut display: Box<dyn Display> = self.build_display();
 
         // Show startup banner once before the first run.
-        display.banner(&self.root, &self.config_path, self.config.steps.len());
+        display.banner(
+            &self.root,
+            &self.config_path,
+            self.config.steps.len(),
+            self.profile.as_deref(),
+        );
 
         let wcfg = watcher::WatchConfig {
             root: self.root.clone(),
@@ -573,4 +620,71 @@ enum RunOutcome {
     FileChange(Vec<PathBuf>),
     Shutdown,
     WatcherDied,
+}
+
+#[cfg(test)]
+mod apply_profile_tests {
+    use super::*;
+    use crate::config::{Config, OnFailureConfig, OutputConfig, Step, WatchConfig};
+
+    fn step(name: &str) -> Step {
+        Step {
+            name: name.into(),
+            cmd: "true".into(),
+            parallel: false,
+            if_changed: Vec::new(),
+        }
+    }
+
+    fn cfg_with_steps(names: &[&str]) -> Config {
+        Config {
+            watch: WatchConfig {
+                extensions: vec!["rs".into()],
+                debounce_ms: 1000,
+                ignore: vec![],
+            },
+            output: OutputConfig::default(),
+            on_failure: OnFailureConfig::default(),
+            steps: names.iter().map(|n| step(n)).collect(),
+            profiles: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn filters_steps_to_profile_members_preserving_order() {
+        let mut cfg = cfg_with_steps(&["fmt", "check", "clippy", "test"]);
+        cfg.profiles
+            .insert("quick".into(), vec!["check".into(), "fmt".into()]);
+
+        apply_profile(&mut cfg, "quick").unwrap();
+
+        let names: Vec<&str> = cfg.steps.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["fmt", "check"]);
+    }
+
+    #[test]
+    fn errors_when_profile_name_unknown() {
+        let mut cfg = cfg_with_steps(&["fmt"]);
+        cfg.profiles.insert("quick".into(), vec!["fmt".into()]);
+
+        let err = apply_profile(&mut cfg, "missing").unwrap_err();
+        let s = err.to_string();
+        assert!(s.contains("profile `missing` not found"), "msg: {s}");
+        assert!(s.contains("quick"), "expected available list in msg: {s}");
+    }
+
+    #[test]
+    fn errors_when_no_profiles_defined() {
+        let mut cfg = cfg_with_steps(&["fmt"]);
+        let err = apply_profile(&mut cfg, "anything").unwrap_err();
+        assert!(err.to_string().contains("no profiles defined"));
+    }
+
+    #[test]
+    fn errors_when_profile_resolves_to_zero_steps() {
+        let mut cfg = cfg_with_steps(&["fmt"]);
+        cfg.profiles.insert("ghost".into(), vec!["nope".into()]);
+        let err = apply_profile(&mut cfg, "ghost").unwrap_err();
+        assert!(err.to_string().contains("zero steps"));
+    }
 }

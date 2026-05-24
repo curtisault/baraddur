@@ -28,6 +28,9 @@ ignore = [\"target\", \".git\", \".baraddur\"]
 # prompt = \"\"             # optional preamble prepended to stdin
 # timeout_secs = 30
 
+# [profiles]                            # optional: named subsets of steps
+# quick = [\"check\"]                     # baraddur --profile quick check
+
 [[steps]]
 name = \"check\"
 cmd = \"cargo check\"

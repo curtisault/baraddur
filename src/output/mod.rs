@@ -74,7 +74,17 @@ pub trait Display: Send {
     fn set_trigger(&mut self, _paths: &[PathBuf]) {}
 
     /// Show the startup banner. Called once before the first pipeline run.
-    fn banner(&mut self, _root: &Path, _config_path: &Path, _step_count: usize) {}
+    /// `profile` is the active profile name (from `--profile <name>`) when
+    /// one narrowed the step list; `None` means every configured step is in
+    /// play.
+    fn banner(
+        &mut self,
+        _root: &Path,
+        _config_path: &Path,
+        _step_count: usize,
+        _profile: Option<&str>,
+    ) {
+    }
 
     /// Advance the spinner animation by one frame. Only redraws if there are
     /// steps in the Running state. Default is a no-op (PlainDisplay).
