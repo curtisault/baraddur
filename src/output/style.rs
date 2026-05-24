@@ -78,6 +78,10 @@ impl Theme {
         self.style(text, |s| s.cyan())
     }
 
+    pub fn cyan_underline<'a>(&self, text: &'a str) -> Styled<'a> {
+        self.style(text, |s| s.cyan().underlined())
+    }
+
     pub fn red<'a>(&self, text: &'a str) -> Styled<'a> {
         self.style(text, |s| s.red())
     }

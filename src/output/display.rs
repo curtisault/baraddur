@@ -123,6 +123,31 @@ fn short_diagnostic(result: &StepResult) -> String {
     }
 }
 
+/// Default `EditorSpawn` implementation. Resolves the editor via
+/// `$VISUAL` → `$EDITOR` → `vi`, parses it through `shell_words` so users
+/// can set things like `EDITOR="code --wait"`, and passes `+LINE FILE`.
+/// `col` is ignored — most editors only accept the line number with the `+`
+/// flag.
+fn default_editor_spawn(path: &Path, line: u32, _col: Option<u32>) -> std::io::Result<()> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".into());
+
+    let parts = shell_words::split(&editor).unwrap_or_else(|_| vec![editor.clone()]);
+    let (program, args) = parts.split_first().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty $EDITOR / $VISUAL")
+    })?;
+
+    // Non-zero exit (user quit with :cq, etc.) isn't an error from baraddur's
+    // perspective; only failure to launch is.
+    let _ = std::process::Command::new(program)
+        .args(args)
+        .arg(format!("+{line}"))
+        .arg(path)
+        .status()?;
+    Ok(())
+}
+
 /// Formats the trigger suffix for a run divider/header.
 /// Single file → `"  ·  lib/foo.ex"`, multiple → `"  ·  3 files"`, none → `""`.
 fn format_trigger_suffix(paths: Option<&[PathBuf]>) -> String {
@@ -362,7 +387,28 @@ pub struct TtyDisplay {
     /// True while an `[on_failure]` hook task is in flight. Renders a dim
     /// "running on_failure hook…" line between the summary and help bar.
     hook_running: bool,
+    /// Root directory of the pipeline (captured from `banner`). Used to
+    /// resolve diagnostic paths emitted relative to the runner cwd.
+    root: PathBuf,
+    /// Diagnostics parsed from each step's output (`run_finished`). Empty
+    /// when a step had no parseable diagnostics or hasn't completed yet.
+    parsed_diagnostics: Vec<Vec<crate::output::diagnostic::Diagnostic>>,
+    /// Index of the "current" diagnostic *within the cursor step's list*.
+    /// Per-step so that moving the cursor away and back preserves the spot.
+    current_diagnostic: Vec<usize>,
+    /// Editor spawn closure — injectable for tests so we can assert the
+    /// command without actually exec'ing a subprocess. Default uses
+    /// `$VISUAL` → `$EDITOR` → `vi` with `+LINE FILE`.
+    editor_spawn: EditorSpawn,
+    /// True while the `?` help modal is showing. The modal replaces the
+    /// one-line help bar with a vertical key reference. Any key dismisses.
+    help_modal_active: bool,
 }
+
+/// `(file, line, col?)` → spawn-and-wait outcome. Returns `Ok(())` when the
+/// editor was launched (even if the user quit it non-zero); `Err` only when
+/// we couldn't start it at all.
+type EditorSpawn = Box<dyn Fn(&Path, u32, Option<u32>) -> std::io::Result<()> + Send + Sync>;
 
 impl Drop for TtyDisplay {
     fn drop(&mut self) {
@@ -417,7 +463,18 @@ impl TtyDisplay {
             transient_message: None,
             last_trigger_paths: None,
             hook_running: false,
+            root: PathBuf::new(),
+            parsed_diagnostics: Vec::new(),
+            current_diagnostic: Vec::new(),
+            editor_spawn: Box::new(default_editor_spawn),
+            help_modal_active: false,
         }
+    }
+
+    /// Replaces the default editor spawner. Tests use this to record the
+    /// `(path, line, col)` triple without actually launching an editor.
+    pub fn set_editor_spawn(&mut self, f: EditorSpawn) {
+        self.editor_spawn = f;
     }
 
     fn term_width() -> usize {
@@ -458,6 +515,127 @@ impl TtyDisplay {
         if self.raw_mode_active {
             let _ = terminal::disable_raw_mode();
             self.raw_mode_active = false;
+        }
+    }
+
+    /// Releases the terminal (raw mode off, cursor visible) for the duration
+    /// of `f`, then restores browse-mode state and redraws. Used by `e` to
+    /// hand the terminal off to `$EDITOR` cleanly.
+    fn with_terminal_released<F, R>(&mut self, f: F) -> R
+    where
+        F: FnOnce(&mut Self) -> R,
+    {
+        let was_browse = self.browse_active;
+        if was_browse {
+            self.raw_mode_off();
+            let _ = execute!(std::io::stdout(), cursor::Show);
+        }
+        let result = f(self);
+        if was_browse {
+            self.raw_mode_on();
+            let _ = execute!(std::io::stdout(), cursor::Hide);
+            self.browse_redraw();
+        }
+        result
+    }
+
+    /// Builds the rendered, styled lines of the `?` help modal. Two-column
+    /// vertical key reference; section headers in cyan, body dim. Returned
+    /// as `Vec<String>` so the caller can size each line individually.
+    fn help_modal_lines(&self) -> Vec<String> {
+        // Each row is `(left, right)`; either may be empty for spacers and
+        // section headers that only occupy one column.
+        let rows: &[(&str, &str)] = &[
+            ("Navigation", "Diagnostics"),
+            ("  j / ↓   down", "  n   next"),
+            ("  k / ↑   up", "  p   prev"),
+            ("  g g     top", "  e   open in editor"),
+            ("  G       bottom", ""),
+            ("", ""),
+            ("Output", "Rerun"),
+            ("  Enter / o  toggle", "  r   pipeline"),
+            ("  O          expand", "  f   failed steps"),
+            ("", "  c   step under cursor"),
+        ];
+
+        let col_width = 26usize;
+        let mut out = Vec::with_capacity(rows.len() + 4);
+
+        // Header.
+        out.push(format!("  {}", self.theme.cyan("Help")));
+        out.push(String::new());
+
+        for (left, right) in rows {
+            let is_header = !left.is_empty() && !left.starts_with(' ');
+            let is_right_header = !right.is_empty() && !right.starts_with(' ');
+
+            let left_styled = if left.is_empty() {
+                String::new()
+            } else if is_header {
+                format!("{}", self.theme.cyan(left))
+            } else {
+                format!("{}", self.theme.dim(left))
+            };
+            let right_styled = if right.is_empty() {
+                String::new()
+            } else if is_right_header {
+                format!("{}", self.theme.cyan(right))
+            } else {
+                format!("{}", self.theme.dim(right))
+            };
+
+            // Pad left to `col_width` visible columns so right column lines up.
+            let left_pad = col_width.saturating_sub(visible_len(&left_styled));
+            out.push(format!("  {left_styled}{:left_pad$}{right_styled}", ""));
+        }
+
+        out.push(String::new());
+        out.push(format!("  {}", self.theme.dim("press any key to dismiss")));
+        out
+    }
+
+    /// Moves the diagnostic cursor for the current step by `delta`, wrapping
+    /// around the list. Returns `false` when the step has no diagnostics.
+    fn advance_diagnostic(&mut self, delta: i32) -> bool {
+        let len = match self.parsed_diagnostics.get(self.cursor) {
+            Some(d) if !d.is_empty() => d.len() as i32,
+            _ => return false,
+        };
+        let cur = self
+            .current_diagnostic
+            .get(self.cursor)
+            .copied()
+            .unwrap_or(0) as i32;
+        let next = (cur + delta).rem_euclid(len) as usize;
+        self.current_diagnostic[self.cursor] = next;
+        true
+    }
+
+    /// Opens the current diagnostic's `(file, line, col)` in the configured
+    /// editor. No-op when the step has no diagnostics; reports spawn errors
+    /// via the transient-message slot.
+    fn open_current_diagnostic(&mut self) {
+        let Some(diags) = self.parsed_diagnostics.get(self.cursor) else {
+            return;
+        };
+        if diags.is_empty() {
+            self.transient_message = Some("no diagnostics on this step".into());
+            return;
+        }
+        let idx = self
+            .current_diagnostic
+            .get(self.cursor)
+            .copied()
+            .unwrap_or(0);
+        let diag = diags[idx].clone();
+        let abs = if diag.path.is_absolute() {
+            diag.path.clone()
+        } else {
+            self.root.join(&diag.path)
+        };
+        let result = self.with_terminal_released(|s| (s.editor_spawn)(&abs, diag.line, diag.col));
+        if let Err(e) = result {
+            self.transient_message = Some(format!("editor: {e}"));
         }
     }
 
@@ -648,20 +826,60 @@ impl TtyDisplay {
             if self.expanded.get(i).copied().unwrap_or(false)
                 && let Some(output) = self.step_outputs.get(i).filter(|o| !o.is_empty())
             {
+                let diags: &[crate::output::diagnostic::Diagnostic] = self
+                    .parsed_diagnostics
+                    .get(i)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let current = self.current_diagnostic.get(i).copied().unwrap_or(0);
+                let is_cursor_step = i == self.cursor;
                 for line in output.lines() {
-                    let r = Self::visual_rows_for(line, width) as usize;
+                    // Output lines have a two-space prefix from
+                    // `format_truncated_output`. Strip before pattern matching.
+                    let raw = line.strip_prefix("  ").unwrap_or(line);
+                    let diag_idx = crate::output::diagnostic::extract_line(raw)
+                        .and_then(|d| diags.iter().position(|x| x == &d));
+                    let (display_line, r) = if let Some(idx) = diag_idx {
+                        let is_current = is_cursor_step && idx == current;
+                        let styled = if is_current {
+                            // Color: cyan marker + cyan underlined body.
+                            // NO_COLOR: distinct `▶` glyph stands in for the
+                            // underline, matching the cursor-row fallback at
+                            // the step-list level.
+                            if self.theme.color_enabled() {
+                                format!(
+                                    "{} {}",
+                                    self.theme.cyan("▸"),
+                                    self.theme.cyan_underline(raw)
+                                )
+                            } else {
+                                format!("▶ {raw}")
+                            }
+                        } else {
+                            format!("{} {raw}", self.theme.dim("▸"))
+                        };
+                        let r = Self::visual_rows_for(&styled, width) as usize;
+                        (styled, r)
+                    } else {
+                        let r = Self::visual_rows_for(line, width) as usize;
+                        (line.to_string(), r)
+                    };
                     cumulative += r;
-                    all_lines.push((line.to_string(), r));
+                    all_lines.push((display_line, r));
                 }
             }
         }
 
         if self.browse_active {
+            // Spacer before the footer.
             all_lines.push((String::new(), 1));
+            cumulative += 1;
             if !self.run_summary.is_empty() {
-                all_lines.push((self.run_summary.clone(), 1));
+                let r = Self::visual_rows_for(&self.run_summary, width) as usize;
+                all_lines.push((self.run_summary.clone(), r));
+                cumulative += r;
                 all_lines.push((String::new(), 1));
-                cumulative += 2;
+                cumulative += 1;
             }
             // Hook slot: "running…" while in flight; output once settled.
             // Only one of the two is shown at a time.
@@ -682,9 +900,20 @@ impl TtyDisplay {
                 all_lines.push((String::new(), 1));
                 cumulative += 1;
             }
-            let help = "  j/k ↑/↓  nav · Enter/o  toggle · O  expand all · r  rerun · f  rerun failed · q  quit";
-            all_lines.push((format!("{}", self.theme.dim(help)), 1));
-            cumulative += 2;
+            if self.help_modal_active {
+                for line in self.help_modal_lines() {
+                    let r = Self::visual_rows_for(&line, width) as usize;
+                    all_lines.push((line, r));
+                    cumulative += r;
+                }
+            } else {
+                // Option B: grouped, symbol-led, fits ~80 cols.
+                let help = "  ↕ j/k   ⏎ toggle   ▸ n/p/e   ↺ r/f/c   ? help · q quit";
+                let help_styled = format!("{}", self.theme.dim(help));
+                let r = Self::visual_rows_for(&help_styled, width) as usize;
+                all_lines.push((help_styled, r));
+                cumulative += r;
+            }
 
             if let Some(msg) = &self.transient_message {
                 let line = format!("  {}", self.theme.yellow(msg));
@@ -783,6 +1012,10 @@ impl Display for TtyDisplay {
     }
 
     fn banner(&mut self, root: &Path, config_path: &Path, step_count: usize) {
+        // Capture for editor-jump path resolution before the early-quiet exit
+        // so diagnostic paths still resolve even when banner output is muted.
+        self.root = root.to_path_buf();
+
         if self.verbosity == Verbosity::Quiet {
             return;
         }
@@ -840,6 +1073,9 @@ impl Display for TtyDisplay {
         self.hook_output_text.clear();
         self.transient_message = None;
         self.hook_running = false;
+        self.parsed_diagnostics = vec![Vec::new(); step_names.len()];
+        self.current_diagnostic = vec![0; step_names.len()];
+        self.help_modal_active = false;
 
         // Stash trigger BEFORE moving the value into the divider, so
         // `run_finished` can detect "file change → zero steps matched".
@@ -920,6 +1156,17 @@ impl Display for TtyDisplay {
             if let Some(idx) = self.step_names.iter().position(|n| n == &r.name) {
                 self.step_outputs[idx] = format_truncated_output(&r.stdout, &r.stderr);
                 self.expanded[idx] = !r.success;
+                // Parse diagnostics from the full (untruncated) output so
+                // entries hidden by elision are still navigable via n/p.
+                let combined = if r.stderr.is_empty() {
+                    r.stdout.clone()
+                } else if r.stdout.is_empty() {
+                    r.stderr.clone()
+                } else {
+                    format!("{}\n{}", r.stdout, r.stderr)
+                };
+                self.parsed_diagnostics[idx] = crate::output::diagnostic::parse(&combined);
+                self.current_diagnostic[idx] = 0;
             }
         }
         self.cursor = results
@@ -1041,6 +1288,15 @@ impl Display for TtyDisplay {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> BrowseAction {
+        // Modal capture: while the `?` help is up, any key dismisses it and
+        // does nothing else — the key isn't forwarded to normal handling so
+        // users don't accidentally rerun or quit while reading the keys.
+        if self.help_modal_active {
+            self.help_modal_active = false;
+            self.last_key = None;
+            return BrowseAction::Redraw;
+        }
+
         let n = self.step_names.len();
         if n == 0 {
             return if matches!(key.code, KeyCode::Char('q')) {
@@ -1115,6 +1371,42 @@ impl Display for TtyDisplay {
                     BrowseAction::Redraw
                 }
             }
+            KeyCode::Char('c') => {
+                self.last_key = None;
+                // Rerun the step under the cursor in isolation. Always
+                // emitted — a skipped step runs alone (matches "rerun
+                // exactly what you pointed at"), and a passing step reruns
+                // freshly which is useful after edits.
+                BrowseAction::RerunCursor(self.step_names[self.cursor].clone())
+            }
+            KeyCode::Char('n') => {
+                self.last_key = None;
+                if self.advance_diagnostic(1) {
+                    BrowseAction::Redraw
+                } else {
+                    self.transient_message = Some("no diagnostics on this step".into());
+                    BrowseAction::Redraw
+                }
+            }
+            KeyCode::Char('p') => {
+                self.last_key = None;
+                if self.advance_diagnostic(-1) {
+                    BrowseAction::Redraw
+                } else {
+                    self.transient_message = Some("no diagnostics on this step".into());
+                    BrowseAction::Redraw
+                }
+            }
+            KeyCode::Char('e') => {
+                self.last_key = None;
+                self.open_current_diagnostic();
+                BrowseAction::Redraw
+            }
+            KeyCode::Char('?') => {
+                self.last_key = None;
+                self.help_modal_active = true;
+                BrowseAction::Redraw
+            }
             KeyCode::Char('q') => BrowseAction::Quit,
             _ => {
                 // Any unrecognized key clears the pending `g` chord.
@@ -1174,6 +1466,151 @@ mod tests {
         assert!(
             after.local_modes.contains(LocalModes::ECHO),
             "ECHO should be restored after restore()"
+        );
+    }
+
+    /// Pressing `c` in browse mode returns `RerunCursor` carrying the name
+    /// of the step under the cursor. Verifies the third rerun key alongside
+    /// `r` (full) and `f` (failed).
+    #[test]
+    fn handle_key_c_returns_rerun_cursor_for_step_under_cursor() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        // Populate step list via the normal lifecycle so internal vectors are
+        // sized correctly. Cursor lands at index 0 by default.
+        d.run_started(&["alpha".to_string(), "beta".to_string(), "gamma".to_string()]);
+        d.cursor = 1;
+
+        let action = d.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        match action {
+            BrowseAction::RerunCursor(name) => assert_eq!(name, "beta"),
+            other => panic!("expected RerunCursor(\"beta\"), got {other:?}"),
+        }
+    }
+
+    /// `n` / `p` wrap around the diagnostic list for the cursor step, and
+    /// `e` hands the *current* `(path, line, col)` to the injected editor
+    /// spawn — proving the navigation index correctly drives editor jump.
+    #[test]
+    fn diagnostic_navigation_and_editor_spawn() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::sync::{Arc, Mutex};
+
+        type EditorCall = (std::path::PathBuf, u32, Option<u32>);
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.banner(
+            std::path::Path::new("/tmp/repo"),
+            std::path::Path::new("/tmp/repo/.baraddur.toml"),
+            1,
+        );
+        d.run_started(&["step".to_string()]);
+
+        d.parsed_diagnostics[0] = vec![
+            crate::output::diagnostic::Diagnostic {
+                path: std::path::PathBuf::from("a.rs"),
+                line: 1,
+                col: Some(1),
+            },
+            crate::output::diagnostic::Diagnostic {
+                path: std::path::PathBuf::from("b.rs"),
+                line: 2,
+                col: Some(2),
+            },
+            crate::output::diagnostic::Diagnostic {
+                path: std::path::PathBuf::from("c.rs"),
+                line: 3,
+                col: None,
+            },
+        ];
+
+        // Recorder captures (path, line, col) on each invocation.
+        let calls: Arc<Mutex<Vec<EditorCall>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = calls.clone();
+        d.set_editor_spawn(Box::new(move |path, line, col| {
+            recorder
+                .lock()
+                .unwrap()
+                .push((path.to_path_buf(), line, col));
+            Ok(())
+        }));
+
+        // Initial diag is index 0 → a.rs.
+        d.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        // n n → 1 → 2; one more n wraps back to 0.
+        d.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        d.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        d.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        d.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        // p wraps 2 → 1.
+        d.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        d.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        let recorded = calls.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 4);
+        assert_eq!(
+            recorded[0],
+            (std::path::PathBuf::from("/tmp/repo/a.rs"), 1, Some(1))
+        );
+        assert_eq!(
+            recorded[1],
+            (std::path::PathBuf::from("/tmp/repo/b.rs"), 2, Some(2))
+        );
+        assert_eq!(
+            recorded[2],
+            (std::path::PathBuf::from("/tmp/repo/c.rs"), 3, None)
+        );
+        assert_eq!(
+            recorded[3],
+            (std::path::PathBuf::from("/tmp/repo/b.rs"), 2, Some(2))
+        );
+    }
+
+    /// `?` opens the help modal; any subsequent key dismisses it without
+    /// forwarding the keypress to the normal handlers (so the user can read
+    /// the keys without accidentally rerunning or quitting).
+    #[test]
+    fn help_modal_opens_on_question_mark_and_dismisses_on_any_key() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["step".to_string()]);
+        assert!(!d.help_modal_active);
+
+        d.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(d.help_modal_active, "? should open the modal");
+
+        // Pressing `q` while the modal is up should dismiss it instead of
+        // quitting — that's the modal-capture guarantee.
+        let action = d.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(matches!(action, BrowseAction::Redraw));
+        assert!(!d.help_modal_active, "any key should dismiss the modal");
+    }
+
+    /// `e` on a step with no diagnostics surfaces a transient message and
+    /// never invokes the spawn closure.
+    #[test]
+    fn editor_key_with_no_diagnostics_is_no_op() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::sync::{Arc, Mutex};
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["step".to_string()]);
+
+        let invoked = Arc::new(Mutex::new(false));
+        let flag = invoked.clone();
+        d.set_editor_spawn(Box::new(move |_, _, _| {
+            *flag.lock().unwrap() = true;
+            Ok(())
+        }));
+
+        d.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        assert!(!*invoked.lock().unwrap(), "editor should not be invoked");
+        assert_eq!(
+            d.transient_message.as_deref(),
+            Some("no diagnostics on this step")
         );
     }
 
