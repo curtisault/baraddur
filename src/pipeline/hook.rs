@@ -141,6 +141,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             duration: Duration::from_millis(10),
+            stdout_truncated: false,
+            stderr_truncated: false,
         }
     }
 
@@ -152,6 +154,8 @@ mod tests {
             stdout: stdout.into(),
             stderr: stderr.into(),
             duration: Duration::from_millis(10),
+            stdout_truncated: false,
+            stderr_truncated: false,
         }
     }
 

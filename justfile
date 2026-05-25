@@ -46,5 +46,15 @@ update-pins:
 run *args:
     cargo run -- {{args}}
 
+# Step-level results from `check --format json`, filtered to {name, success, ms}.
+# Pass extra args through (e.g. `just json-steps --profile quick`).
+json-steps *args:
+    cargo run --quiet -- check --format json {{args}} | jq -c 'select(.event == "step_finished") | {name, success, ms: .duration_ms}'
+
+# Tail run-level events in watch mode (run_started / run_cancelled / run_finished).
+# Ctrl-C to exit. Edit a watched file to see a new run.
+json-watch *args:
+    cargo run --quiet -- --format json {{args}} | jq -c 'select(.event | test("^run_"))'
+
 clean:
     cargo clean

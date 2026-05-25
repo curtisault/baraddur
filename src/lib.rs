@@ -14,7 +14,9 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 
 use crate::output::style::{Theme, should_color};
-use crate::output::{BrowseAction, Display, DisplayConfig, PlainDisplay, TtyDisplay};
+use crate::output::{
+    BrowseAction, Display, DisplayConfig, JsonDisplay, OutputFormat, PlainDisplay, TtyDisplay,
+};
 use crate::pipeline::StepResult;
 
 /// Result of the spawned on_failure hook task. Outer Result is the join
@@ -89,9 +91,13 @@ impl App {
     }
 
     /// Constructs the display the watch loop uses based on `display_config`.
-    /// `TtyDisplay` when attached to a terminal, `PlainDisplay` otherwise.
+    /// `JsonDisplay` when format is Json; otherwise `TtyDisplay` when attached
+    /// to a terminal, `PlainDisplay` for non-TTY contexts.
     fn build_display(&self) -> Box<dyn Display> {
         let dc = &self.display_config;
+        if dc.format == OutputFormat::Json {
+            return Box::new(JsonDisplay::new());
+        }
         let color = should_color(dc.is_tty);
         if dc.is_tty {
             Box::new(TtyDisplay::new(
@@ -111,9 +117,12 @@ impl App {
     /// synchronously when the run fails.
     pub async fn run_once(self, opts: RunOnceOptions) -> Result<bool> {
         let dc = &self.display_config;
-        let color = should_color(dc.is_tty);
-        let mut display: Box<dyn Display> =
-            Box::new(PlainDisplay::new(Theme::new(color), dc.verbosity));
+        let mut display: Box<dyn Display> = if dc.format == OutputFormat::Json {
+            Box::new(JsonDisplay::new())
+        } else {
+            let color = should_color(dc.is_tty);
+            Box::new(PlainDisplay::new(Theme::new(color), dc.verbosity))
+        };
 
         display.banner(
             &self.root,

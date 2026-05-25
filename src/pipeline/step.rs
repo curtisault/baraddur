@@ -16,6 +16,10 @@ pub struct StepResult {
     pub stdout: String,
     pub stderr: String,
     pub duration: Duration,
+    /// True when `stdout` was clipped at `MAX_CAPTURE_BYTES`.
+    pub stdout_truncated: bool,
+    /// True when `stderr` was clipped at `MAX_CAPTURE_BYTES`.
+    pub stderr_truncated: bool,
 }
 
 /// Runs a single step and returns its result.
@@ -42,14 +46,20 @@ pub async fn run(step: &Step, cwd: &Path) -> Result<StepResult> {
     let duration = start.elapsed();
 
     let result = match output {
-        Ok(out) => StepResult {
-            name: step.name.clone(),
-            success: out.status.success(),
-            exit_code: out.status.code(),
-            stdout: truncate_capture(&out.stdout),
-            stderr: truncate_capture(&out.stderr),
-            duration,
-        },
+        Ok(out) => {
+            let (stdout, stdout_truncated) = truncate_capture(&out.stdout);
+            let (stderr, stderr_truncated) = truncate_capture(&out.stderr);
+            StepResult {
+                name: step.name.clone(),
+                success: out.status.success(),
+                exit_code: out.status.code(),
+                stdout,
+                stderr,
+                duration,
+                stdout_truncated,
+                stderr_truncated,
+            }
+        }
         Err(e) => StepResult {
             name: step.name.clone(),
             success: false,
@@ -57,18 +67,20 @@ pub async fn run(step: &Step, cwd: &Path) -> Result<StepResult> {
             stdout: String::new(),
             stderr: format!("failed to launch `{program}`: {e}"),
             duration,
+            stdout_truncated: false,
+            stderr_truncated: false,
         },
     };
 
     Ok(result)
 }
 
-fn truncate_capture(bytes: &[u8]) -> String {
+fn truncate_capture(bytes: &[u8]) -> (String, bool) {
     if bytes.len() <= MAX_CAPTURE_BYTES {
-        String::from_utf8_lossy(bytes).into_owned()
+        (String::from_utf8_lossy(bytes).into_owned(), false)
     } else {
         let mut s = String::from_utf8_lossy(&bytes[..MAX_CAPTURE_BYTES]).into_owned();
         s.push_str("\n... [output truncated at 100 KiB] ...\n");
-        s
+        (s, true)
     }
 }

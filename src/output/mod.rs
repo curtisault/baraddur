@@ -1,7 +1,9 @@
 pub mod diagnostic;
 pub mod display;
+pub mod json;
 pub mod style;
 pub use display::{PlainDisplay, TtyDisplay};
+pub use json::JsonDisplay;
 pub use style::Theme;
 
 use crate::pipeline::StepResult;
@@ -15,10 +17,24 @@ pub enum Verbosity {
     Debug,
 }
 
+/// Output renderer selection.
+///
+/// `Auto` keeps the existing behavior (TTY → `TtyDisplay`, non-TTY →
+/// `PlainDisplay`). `Json` forces `JsonDisplay` regardless of `is_tty`, and
+/// also forces non-interactive behavior (no spinner, no browse mode) so the
+/// stdout event stream stays clean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputFormat {
+    #[default]
+    Auto,
+    Json,
+}
+
 pub struct DisplayConfig {
     pub is_tty: bool,
     pub no_clear: bool,
     pub verbosity: Verbosity,
+    pub format: OutputFormat,
 }
 
 /// Returned by `Display::handle_key` to tell the caller what to do next.
