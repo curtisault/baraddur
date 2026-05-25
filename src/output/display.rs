@@ -1633,6 +1633,183 @@ mod tests {
         );
     }
 
+    fn mk_step_result(
+        success: bool,
+        exit_code: Option<i32>,
+        stdout: &str,
+        stderr: &str,
+    ) -> StepResult {
+        StepResult {
+            name: "s".into(),
+            success,
+            exit_code,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            duration: Duration::from_secs(0),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }
+    }
+
+    #[test]
+    fn short_diagnostic_empty_when_step_succeeded() {
+        let r = mk_step_result(true, Some(0), "anything\n", "");
+        assert_eq!(short_diagnostic(&r), "");
+    }
+
+    #[test]
+    fn short_diagnostic_reports_command_not_found_for_no_exit_code() {
+        let r = mk_step_result(false, None, "", "");
+        assert_eq!(short_diagnostic(&r), "command not found");
+    }
+
+    #[test]
+    fn short_diagnostic_empty_when_no_non_blank_output() {
+        let r = mk_step_result(false, Some(1), "  \n\n   \n", "");
+        assert_eq!(short_diagnostic(&r), "");
+    }
+
+    #[test]
+    fn short_diagnostic_returns_single_short_line_untouched() {
+        let r = mk_step_result(false, Some(1), "boom\n", "");
+        assert_eq!(short_diagnostic(&r), "boom");
+    }
+
+    #[test]
+    fn short_diagnostic_truncates_single_long_line_at_40_chars() {
+        let line = "x".repeat(50);
+        let r = mk_step_result(false, Some(1), &line, "");
+        let out = short_diagnostic(&r);
+        assert_eq!(out.chars().filter(|c| *c == 'x').count(), 40);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn short_diagnostic_summarizes_multiple_lines_as_count() {
+        let r = mk_step_result(false, Some(2), "error one\nerror two\nerror three\n", "");
+        assert_eq!(short_diagnostic(&r), "3 lines");
+    }
+
+    #[test]
+    fn short_diagnostic_merges_stdout_and_stderr_for_line_count() {
+        let r = mk_step_result(false, Some(1), "a\n", "b\nc\n");
+        // stdout "a\n" + stderr "b\nc\n" concatenated → 3 non-blank lines.
+        assert_eq!(short_diagnostic(&r), "3 lines");
+    }
+
+    #[test]
+    fn help_modal_lines_has_header_columns_and_dismiss_footer() {
+        use super::super::style::strip_ansi;
+
+        let d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        let lines = d.help_modal_lines();
+
+        // 1 header + 1 blank + 10 rows + 1 blank + 1 footer = 14 lines.
+        assert_eq!(lines.len(), 14, "unexpected line count: {lines:#?}");
+
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert_eq!(plain[0].trim(), "Help");
+        assert_eq!(plain[1], "");
+        assert!(
+            plain[2].contains("Navigation") && plain[2].contains("Diagnostics"),
+            "first row should carry both section headers, got {:?}",
+            plain[2]
+        );
+        assert!(
+            plain
+                .iter()
+                .any(|l| l.contains("Output") && l.contains("Rerun")),
+            "expected a row pairing Output / Rerun"
+        );
+        assert!(plain.last().unwrap().contains("press any key to dismiss"));
+    }
+
+    #[test]
+    fn help_modal_lines_pads_left_column_to_align_right_column() {
+        use super::super::style::{strip_ansi, visible_len};
+
+        let d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        let lines = d.help_modal_lines();
+
+        // Find the "j / ↓ down  …  n   next" row and confirm the right column
+        // starts at the same visible offset as on the section-header row.
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        let header_row = plain
+            .iter()
+            .find(|l| l.contains("Navigation") && l.contains("Diagnostics"))
+            .expect("header row");
+        let body_row = plain
+            .iter()
+            .find(|l| l.contains("down") && l.contains("next"))
+            .expect("body row");
+
+        // Right column starts at offset 2 (prefix) + 26 (col_width) = 28.
+        let header_right = visible_len(&header_row[..header_row.find("Diagnostics").unwrap()]);
+        // The body row's right column literally begins with `"  n   next"`,
+        // so the first occurrence of `"  n"` marks its start.
+        let body_right = visible_len(&body_row[..body_row.find("  n").unwrap()]);
+        assert_eq!(header_right, 28);
+        assert_eq!(body_right, 28);
+    }
+
+    #[test]
+    fn divider_styled_returns_empty_when_divider_is_empty() {
+        let d = TtyDisplay::new(Theme::new(true), Verbosity::Normal, true);
+        // Default state: run_divider is empty, statuses is empty.
+        assert_eq!(d.divider_styled(), "");
+    }
+
+    #[test]
+    fn divider_styled_is_dim_while_steps_still_running() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(true), Verbosity::Normal, true);
+        d.run_divider = "── run ──".into();
+        d.statuses = vec![
+            StepStatus::Passed(Duration::from_secs(0)),
+            StepStatus::Running,
+        ];
+
+        let out = d.divider_styled();
+        assert_eq!(strip_ansi(&out), "── run ──");
+        // Dim is rendered via ESC[2m in the theme; green/red use ESC[32m/[31m.
+        assert!(out.contains("\x1b[2m"), "expected dim ANSI, got {out:?}");
+        assert!(!out.contains("\x1b[32m") && !out.contains("\x1b[31m"));
+    }
+
+    #[test]
+    fn divider_styled_is_green_when_all_settled_and_passing() {
+        let mut d = TtyDisplay::new(Theme::new(true), Verbosity::Normal, true);
+        d.run_divider = "── run ──".into();
+        d.statuses = vec![
+            StepStatus::Passed(Duration::from_secs(0)),
+            StepStatus::Skipped,
+        ];
+
+        let out = d.divider_styled();
+        // crossterm renders `.green()` as the 256-color code 10.
+        assert!(
+            out.contains("[38;5;10m"),
+            "expected green ANSI, got {out:?}"
+        );
+        assert!(!out.contains("[38;5;9m") && !out.contains("[2m"));
+    }
+
+    #[test]
+    fn divider_styled_is_red_when_all_settled_and_any_failed() {
+        let mut d = TtyDisplay::new(Theme::new(true), Verbosity::Normal, true);
+        d.run_divider = "── run ──".into();
+        d.statuses = vec![
+            StepStatus::Passed(Duration::from_secs(0)),
+            StepStatus::Failed(Duration::from_secs(0), "boom".into()),
+        ];
+
+        let out = d.divider_styled();
+        // crossterm renders `.red()` as the 256-color code 9.
+        assert!(out.contains("[38;5;9m"), "expected red ANSI, got {out:?}");
+        assert!(!out.contains("[38;5;10m") && !out.contains("[2m"));
+    }
+
     /// restore_signals_and_output must turn OPOST and ISIG back on, even if
     /// they had been cleared (as crossterm's enable_raw_mode would).
     #[test]
