@@ -104,7 +104,13 @@ impl Theme {
 /// Returns the visible character count of a string, stripping ANSI SGR
 /// escape sequences (ESC [ ... m).
 pub fn visible_len(s: &str) -> usize {
-    let mut len = 0;
+    strip_ansi(s).chars().count()
+}
+
+/// Returns a copy of `s` with ANSI SGR escape sequences (ESC [ ... m) removed.
+/// Used by the JSON event stream so consumers don't have to handle escapes.
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
     let mut in_escape = false;
     for c in s.chars() {
         if c == '\x1b' {
@@ -114,10 +120,10 @@ pub fn visible_len(s: &str) -> usize {
                 in_escape = false;
             }
         } else {
-            len += 1;
+            out.push(c);
         }
     }
-    len
+    out
 }
 
 #[cfg(test)]
@@ -147,6 +153,25 @@ mod tests {
         let s = format!("{}", theme.pass_glyph());
         assert_eq!(s, "✓");
         assert!(!s.contains('\x1b'));
+    }
+
+    #[test]
+    fn strip_ansi_removes_escapes() {
+        let styled = format!("{}", "hi".green().bold());
+        assert!(styled.contains('\x1b'));
+        let plain = strip_ansi(&styled);
+        assert_eq!(plain, "hi");
+        assert!(!plain.contains('\x1b'));
+    }
+
+    #[test]
+    fn strip_ansi_preserves_plain_text() {
+        assert_eq!(strip_ansi("hello\nworld"), "hello\nworld");
+    }
+
+    #[test]
+    fn strip_ansi_empty() {
+        assert_eq!(strip_ansi(""), "");
     }
 
     #[test]

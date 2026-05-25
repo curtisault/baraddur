@@ -5,3 +5,4 @@
 **/.serena
 /.envrc
 /.claude/scheduled_tasks.lock
+/lcov.info

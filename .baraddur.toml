@@ -7,6 +7,12 @@ ignore = ["target", ".git", ".baraddur", ".claude"]
 clear_screen = true
 show_passing = false
 
+# Named subsets selectable via `--profile <name>`. Composes with --staged /
+# --since / if_changed (profile narrows first, path filtering after).
+[profiles]
+quick = ["fmt", "clippy"]
+full  = ["fmt", "clippy", "test"]
+
 [[steps]]
 name = "fmt"
 cmd = "cargo fmt --check"

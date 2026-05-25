@@ -96,6 +96,7 @@ dependencies = [
  "rustix",
  "rustix-openpty",
  "serde",
+ "serde_json",
  "shell-words",
  "tempfile",
  "tokio",

@@ -49,6 +49,7 @@ fn make_config(steps: Vec<Step>) -> Config {
         output: OutputConfig::default(),
         on_failure: OnFailureConfig::default(),
         steps,
+        profiles: std::collections::HashMap::new(),
     }
 }
 

@@ -29,6 +29,7 @@ fn trivial_app(td: &TempDir, step_cmd: &str) -> App {
             parallel: false,
             if_changed: Vec::new(),
         }],
+        profiles: std::collections::HashMap::new(),
     };
     App {
         config,
@@ -38,7 +39,9 @@ fn trivial_app(td: &TempDir, step_cmd: &str) -> App {
             is_tty: false,
             no_clear: true,
             verbosity: Verbosity::Quiet,
+            format: baraddur::output::OutputFormat::Auto,
         },
+        profile: None,
     }
 }
 
@@ -214,6 +217,7 @@ async fn run_once_with_staged_paths_filters_step_subset() {
                     if_changed: vec!["**/*.md".into()],
                 },
             ],
+            profiles: std::collections::HashMap::new(),
         },
         config_path: root.join(".baraddur.toml"),
         root: root.clone(),
@@ -221,7 +225,9 @@ async fn run_once_with_staged_paths_filters_step_subset() {
             is_tty: false,
             no_clear: true,
             verbosity: Verbosity::Quiet,
+            format: baraddur::output::OutputFormat::Auto,
         },
+        profile: None,
     };
 
     let success = app

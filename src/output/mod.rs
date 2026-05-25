@@ -1,7 +1,9 @@
 pub mod diagnostic;
 pub mod display;
+pub mod json;
 pub mod style;
 pub use display::{PlainDisplay, TtyDisplay};
+pub use json::JsonDisplay;
 pub use style::Theme;
 
 use crate::pipeline::StepResult;
@@ -15,10 +17,24 @@ pub enum Verbosity {
     Debug,
 }
 
+/// Output renderer selection.
+///
+/// `Auto` keeps the existing behavior (TTY → `TtyDisplay`, non-TTY →
+/// `PlainDisplay`). `Json` forces `JsonDisplay` regardless of `is_tty`, and
+/// also forces non-interactive behavior (no spinner, no browse mode) so the
+/// stdout event stream stays clean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputFormat {
+    #[default]
+    Auto,
+    Json,
+}
+
 pub struct DisplayConfig {
     pub is_tty: bool,
     pub no_clear: bool,
     pub verbosity: Verbosity,
+    pub format: OutputFormat,
 }
 
 /// Returned by `Display::handle_key` to tell the caller what to do next.
@@ -74,7 +90,17 @@ pub trait Display: Send {
     fn set_trigger(&mut self, _paths: &[PathBuf]) {}
 
     /// Show the startup banner. Called once before the first pipeline run.
-    fn banner(&mut self, _root: &Path, _config_path: &Path, _step_count: usize) {}
+    /// `profile` is the active profile name (from `--profile <name>`) when
+    /// one narrowed the step list; `None` means every configured step is in
+    /// play.
+    fn banner(
+        &mut self,
+        _root: &Path,
+        _config_path: &Path,
+        _step_count: usize,
+        _profile: Option<&str>,
+    ) {
+    }
 
     /// Advance the spinner animation by one frame. Only redraws if there are
     /// steps in the Running state. Default is a no-op (PlainDisplay).

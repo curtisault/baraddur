@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use baraddur::RunOnceOptions;
 use baraddur::config::{self, ConfigSource};
-use baraddur::output::{DisplayConfig, Verbosity};
+use baraddur::output::{DisplayConfig, OutputFormat, Verbosity};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -23,13 +23,24 @@ struct Cli {
     #[arg(short = 'c', long, global = true)]
     config: Option<PathBuf>,
 
+    /// Run only the steps in the named profile (defined under `[profiles]`
+    /// in the config). Applies to `watch`, `check`, and `gate`.
+    #[arg(short = 'p', long, global = true, value_name = "NAME")]
+    profile: Option<String>,
+
     /// Directory to watch [default: directory containing the discovered config]
     #[arg(short = 'w', long)]
     watch_dir: Option<PathBuf>,
 
     /// Force non-TTY (append-only) output even on a terminal
-    #[arg(long)]
+    #[arg(long, global = true, conflicts_with = "format")]
     no_tty: bool,
+
+    /// Output format. `auto` (default) renders for the terminal; `json` emits
+    /// one NDJSON event per line on stdout (see `docs/json-events.md`).
+    /// Implies non-interactive behavior — no spinner, no browse mode.
+    #[arg(long, global = true, value_enum, default_value_t = OutputFormatArg::Auto, value_name = "FORMAT")]
+    format: OutputFormatArg,
 
     /// Don't clear screen between runs
     #[arg(long)]
@@ -94,6 +105,21 @@ enum Command {
         #[arg(trailing_var_arg = true, required = true, num_args = 1..)]
         wrapped: Vec<String>,
     },
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum OutputFormatArg {
+    Auto,
+    Json,
+}
+
+impl From<OutputFormatArg> for OutputFormat {
+    fn from(v: OutputFormatArg) -> Self {
+        match v {
+            OutputFormatArg::Auto => OutputFormat::Auto,
+            OutputFormatArg::Json => OutputFormat::Json,
+        }
+    }
 }
 
 impl Cli {
@@ -234,7 +260,11 @@ fn build_app(cli: &Cli) -> Result<baraddur::App, BuildAppError> {
     let loaded =
         config::load(cli.config.as_deref()).map_err(|e| BuildAppError::Config(format!("{e}")))?;
 
-    let is_tty = !cli.no_tty && std::io::stdout().is_terminal();
+    let format: OutputFormat = cli.format.into();
+    // JSON mode forces non-interactive rendering — no spinner, no browse
+    // mode. Treating is_tty as false here keeps the run loop's existing
+    // gating untouched.
+    let is_tty = format == OutputFormat::Auto && !cli.no_tty && std::io::stdout().is_terminal();
     let no_clear = cli.no_clear;
     let verbosity = cli.verbosity();
 
@@ -247,15 +277,23 @@ fn build_app(cli: &Cli) -> Result<baraddur::App, BuildAppError> {
         },
     };
 
+    let mut config = loaded.config;
+    if let Some(name) = cli.profile.as_deref() {
+        baraddur::apply_profile(&mut config, name)
+            .map_err(|e| BuildAppError::Config(format!("{e}")))?;
+    }
+
     Ok(baraddur::App {
-        config: loaded.config,
+        config,
         config_path: loaded.config_path,
         root,
         display_config: DisplayConfig {
             is_tty,
             no_clear,
             verbosity,
+            format,
         },
+        profile: cli.profile.clone(),
     })
 }
 
