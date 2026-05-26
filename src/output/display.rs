@@ -922,19 +922,13 @@ impl TtyDisplay {
         out
     }
 
-    /// Redraws the step list for browse mode: includes cursor highlight and
-    /// inline expanded output for toggled steps. Clipped to terminal height
-    /// via a scroll viewport that always keeps the cursor step visible.
-    fn browse_redraw(&mut self) {
-        let mut stdout = std::io::stdout();
-        let width = Self::term_width();
-        let term_height = Self::term_height() as usize;
-
-        // ── Build full content into (text, terminal_rows) pairs ──────────
-        // We build everything first, then apply viewport clipping, so the
-        // scroll logic can see total height before deciding what to render.
+    /// Assembles the full content of the browse-mode view as `(text, rows)`
+    /// pairs, alongside the cursor step's vertical anchor (top row and row
+    /// height in the buffer). Pure over `&self` so scroll math and paint
+    /// can be tested or invoked independently.
+    fn compute_lines(&self, width: usize) -> (Vec<(String, usize)>, usize, usize) {
         let mut all_lines: Vec<(String, usize)> = Vec::new();
-        let mut cursor_top_row = 0usize; // terminal row where the cursor step starts
+        let mut cursor_top_row = 0usize;
         let mut cursor_row_height = 1usize;
         let mut cumulative = 0usize;
 
@@ -959,15 +953,32 @@ impl TtyDisplay {
             }
         }
 
+        // Footer rows aren't tracked here — `cumulative` was only needed to
+        // anchor the cursor, which is always above the footer.
         for (line, r) in self.footer_lines(width) {
-            cumulative += r;
             all_lines.push((line, r));
         }
+        let _ = cumulative;
 
-        // ── Adjust scroll so cursor step stays in viewport ───────────────
-        // Reserve 1 extra row so the last line never hugs the very bottom.
+        (all_lines, cursor_top_row, cursor_row_height)
+    }
+
+    /// Redraws the step list for browse mode: includes cursor highlight and
+    /// inline expanded output for toggled steps. Clipped to terminal height
+    /// via a scroll viewport that always keeps the cursor step visible.
+    /// Layout is built by `compute_lines`; this function owns scroll math
+    /// and the terminal paint.
+    fn browse_redraw(&mut self) {
+        let mut stdout = std::io::stdout();
+        let width = Self::term_width();
+        let term_height = Self::term_height() as usize;
+
+        let (all_lines, cursor_top_row, cursor_row_height) = self.compute_lines(width);
+        let total_rows: usize = all_lines.iter().map(|(_, r)| r).sum();
+
+        // Adjust scroll so the cursor step stays in viewport. Reserve 1 row
+        // so the last line never hugs the very bottom.
         let viewport = term_height.saturating_sub(1);
-        let total_rows = cumulative;
 
         if cursor_top_row < self.browse_scroll {
             self.browse_scroll = cursor_top_row;
@@ -2066,6 +2077,87 @@ mod tests {
             last.contains("no failures to rerun"),
             "transient message should be the last footer entry: {last:?}"
         );
+    }
+
+    #[test]
+    fn compute_lines_empty_state_returns_empty_layout() {
+        let d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        let (lines, top, h) = d.compute_lines(80);
+        assert!(lines.is_empty());
+        assert_eq!(top, 0);
+        assert_eq!(h, 1);
+    }
+
+    #[test]
+    fn compute_lines_anchors_cursor_to_step_offset() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string(), "b".to_string(), "c".to_string()]);
+        // `run_started` populates `run_divider`; clear it so the test exercises
+        // pure step-offset math without divider arithmetic.
+        d.run_divider.clear();
+        d.cursor = 2;
+
+        let (lines, top, h) = d.compute_lines(80);
+        assert_eq!(lines.len(), 3, "expected one row per step");
+        // Each step row is 1 terminal row at width 80, so cursor at index 2
+        // sits at rows 0+1 = 2.
+        assert_eq!(top, 2);
+        assert_eq!(h, 1);
+    }
+
+    #[test]
+    fn compute_lines_offsets_cursor_by_run_divider() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string(), "b".to_string()]);
+        d.cursor = 0;
+        d.run_divider = "── run ──".into();
+
+        let (lines, top, _) = d.compute_lines(80);
+        // [divider, step a, step b] = 3 entries; cursor on step a is at
+        // row 1, after the 1-row divider.
+        assert_eq!(lines.len(), 3);
+        assert_eq!(top, 1);
+    }
+
+    #[test]
+    fn compute_lines_shifts_cursor_anchor_by_earlier_step_expansion() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string(), "b".to_string()]);
+        d.run_divider.clear(); // isolate from the run_started divider
+        d.cursor = 1;
+        d.expanded[0] = true;
+        d.step_outputs[0] = "  line one\n  line two\n  line three\n".into();
+
+        let (lines, top, _) = d.compute_lines(80);
+        // [step a, exp1, exp2, exp3, step b] = 5 entries.
+        assert_eq!(lines.len(), 5);
+        // Cursor on step b: row 0 (step a) + rows 1..=3 (expansion) = 4.
+        assert_eq!(top, 4);
+    }
+
+    #[test]
+    fn compute_lines_appends_footer_after_step_block() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string()]);
+        d.browse_active = true;
+        d.run_summary = "1 passed in 1.2s".into();
+
+        let (lines, _, _) = d.compute_lines(80);
+        // Step row first, then the footer (spacer + summary + spacer + help bar).
+        assert!(lines.len() > 1, "expected step + footer entries");
+        let plain: Vec<String> = lines.iter().map(|(s, _)| strip_ansi(s)).collect();
+        // Step row comes before the summary line.
+        let summary_idx = plain
+            .iter()
+            .position(|l| l.contains("1 passed in 1.2s"))
+            .expect("summary line missing");
+        let step_idx = plain
+            .iter()
+            .position(|l| l.contains('a'))
+            .expect("step row missing");
+        assert!(step_idx < summary_idx, "footer should follow step block");
     }
 
     /// restore_signals_and_output must turn OPOST and ISIG back on, even if
