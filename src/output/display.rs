@@ -808,6 +808,64 @@ impl TtyDisplay {
         }
     }
 
+    /// Builds the expanded inline-output lines for step `i`. Lines that parse
+    /// as a diagnostic are highlighted; the "current" diagnostic on the cursor
+    /// step gets the strongest highlight (cyan underline, or `▶` in NO_COLOR).
+    /// Returns an empty Vec when the step is not expanded or has no captured
+    /// output.
+    fn expanded_output_lines(&self, i: usize, width: usize) -> Vec<(String, usize)> {
+        if !self.expanded.get(i).copied().unwrap_or(false) {
+            return Vec::new();
+        }
+        let Some(output) = self.step_outputs.get(i).filter(|o| !o.is_empty()) else {
+            return Vec::new();
+        };
+
+        let diags: &[crate::output::diagnostic::Diagnostic] = self
+            .parsed_diagnostics
+            .get(i)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let current = self.current_diagnostic.get(i).copied().unwrap_or(0);
+        let is_cursor_step = i == self.cursor;
+
+        let mut out = Vec::new();
+        for line in output.lines() {
+            // Output lines have a two-space prefix from
+            // `format_truncated_output`. Strip before pattern matching.
+            let raw = line.strip_prefix("  ").unwrap_or(line);
+            let diag_idx = crate::output::diagnostic::extract_line(raw)
+                .and_then(|d| diags.iter().position(|x| x == &d));
+            let (display_line, r) = if let Some(idx) = diag_idx {
+                let is_current = is_cursor_step && idx == current;
+                let styled = if is_current {
+                    // Color: cyan marker + cyan underlined body.
+                    // NO_COLOR: distinct `▶` glyph stands in for the
+                    // underline, matching the cursor-row fallback at
+                    // the step-list level.
+                    if self.theme.color_enabled() {
+                        format!(
+                            "{} {}",
+                            self.theme.cyan("▸"),
+                            self.theme.cyan_underline(raw)
+                        )
+                    } else {
+                        format!("▶ {raw}")
+                    }
+                } else {
+                    format!("{} {raw}", self.theme.dim("▸"))
+                };
+                let r = Self::visual_rows_for(&styled, width) as usize;
+                (styled, r)
+            } else {
+                let r = Self::visual_rows_for(line, width) as usize;
+                (line.to_string(), r)
+            };
+            out.push((display_line, r));
+        }
+        out
+    }
+
     /// Redraws the step list for browse mode: includes cursor highlight and
     /// inline expanded output for toggled steps. Clipped to terminal height
     /// via a scroll viewport that always keeps the cursor step visible.
@@ -839,50 +897,9 @@ impl TtyDisplay {
             cumulative += step_rows;
             all_lines.push((step_text, step_rows));
 
-            if self.expanded.get(i).copied().unwrap_or(false)
-                && let Some(output) = self.step_outputs.get(i).filter(|o| !o.is_empty())
-            {
-                let diags: &[crate::output::diagnostic::Diagnostic] = self
-                    .parsed_diagnostics
-                    .get(i)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
-                let current = self.current_diagnostic.get(i).copied().unwrap_or(0);
-                let is_cursor_step = i == self.cursor;
-                for line in output.lines() {
-                    // Output lines have a two-space prefix from
-                    // `format_truncated_output`. Strip before pattern matching.
-                    let raw = line.strip_prefix("  ").unwrap_or(line);
-                    let diag_idx = crate::output::diagnostic::extract_line(raw)
-                        .and_then(|d| diags.iter().position(|x| x == &d));
-                    let (display_line, r) = if let Some(idx) = diag_idx {
-                        let is_current = is_cursor_step && idx == current;
-                        let styled = if is_current {
-                            // Color: cyan marker + cyan underlined body.
-                            // NO_COLOR: distinct `▶` glyph stands in for the
-                            // underline, matching the cursor-row fallback at
-                            // the step-list level.
-                            if self.theme.color_enabled() {
-                                format!(
-                                    "{} {}",
-                                    self.theme.cyan("▸"),
-                                    self.theme.cyan_underline(raw)
-                                )
-                            } else {
-                                format!("▶ {raw}")
-                            }
-                        } else {
-                            format!("{} {raw}", self.theme.dim("▸"))
-                        };
-                        let r = Self::visual_rows_for(&styled, width) as usize;
-                        (styled, r)
-                    } else {
-                        let r = Self::visual_rows_for(line, width) as usize;
-                        (line.to_string(), r)
-                    };
-                    cumulative += r;
-                    all_lines.push((display_line, r));
-                }
+            for (line, r) in self.expanded_output_lines(i, width) {
+                cumulative += r;
+                all_lines.push((line, r));
             }
         }
 
