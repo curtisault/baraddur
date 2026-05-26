@@ -737,6 +737,77 @@ impl TtyDisplay {
         let _ = stdout.flush();
     }
 
+    /// Builds the single status row for step index `i`: glyph + name + optional
+    /// inline diagnostic + optional right-justified duration, with cursor
+    /// highlight when in browse mode. Returns `(rendered_line, terminal_rows)`.
+    fn step_row(&self, i: usize, width: usize) -> (String, usize) {
+        let (glyph, diagnostic, duration_str) = match &self.statuses[i] {
+            StepStatus::Queued => (
+                format!("{}", self.theme.queued_glyph()),
+                String::new(),
+                String::new(),
+            ),
+            StepStatus::Running => {
+                let frame = SPINNER_FRAMES[self.spinner_frame];
+                (
+                    format!("{}", self.theme.yellow(frame)),
+                    String::new(),
+                    String::new(),
+                )
+            }
+            StepStatus::Passed(d) => (
+                format!("{}", self.theme.pass_glyph()),
+                String::new(),
+                format!("{:.1}s", d.as_secs_f64()),
+            ),
+            StepStatus::Failed(d, diag) => {
+                let d_str = format!("{:.1}s", d.as_secs_f64());
+                let diag_str = if diag.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}", self.theme.dim(diag))
+                };
+                (format!("{}", self.theme.fail_glyph()), diag_str, d_str)
+            }
+            StepStatus::Skipped => (
+                format!("{}", self.theme.skip_glyph()),
+                format!("{}", self.theme.dim("skipped")),
+                String::new(),
+            ),
+        };
+
+        let arrow = if i == self.cursor && !self.theme.color_enabled() {
+            "▶"
+        } else {
+            "▸"
+        };
+        let raw_prefix = format!("{arrow} {:nw$}", self.step_names[i], nw = self.name_width);
+        let styled_prefix = if i == self.cursor && self.browse_active {
+            format!("{}", self.theme.selected(&raw_prefix))
+        } else {
+            raw_prefix
+        };
+
+        let left = if diagnostic.is_empty() {
+            format!("{styled_prefix}  {glyph}")
+        } else {
+            format!("{styled_prefix}  {glyph}   {diagnostic}")
+        };
+
+        if duration_str.is_empty() {
+            let r = Self::visual_rows_for(&left, width) as usize;
+            (left, r)
+        } else {
+            let right = format!("{}", self.theme.dim(&duration_str));
+            let left_vis = visible_len(&left);
+            let right_vis = visible_len(&right);
+            let pad = width.saturating_sub(left_vis + right_vis);
+            let line = format!("{left}{:pad$}{right}", "");
+            let r = Self::visual_rows_for(&line, width) as usize;
+            (line, r)
+        }
+    }
+
     /// Redraws the step list for browse mode: includes cursor highlight and
     /// inline expanded output for toggled steps. Clipped to terminal height
     /// via a scroll viewport that always keeps the cursor step visible.
@@ -758,72 +829,8 @@ impl TtyDisplay {
             cumulative += 1;
         }
 
-        for (i, name) in self.step_names.iter().enumerate() {
-            let (glyph, diagnostic, duration_str) = match &self.statuses[i] {
-                StepStatus::Queued => (
-                    format!("{}", self.theme.queued_glyph()),
-                    String::new(),
-                    String::new(),
-                ),
-                StepStatus::Running => {
-                    let frame = SPINNER_FRAMES[self.spinner_frame];
-                    (
-                        format!("{}", self.theme.yellow(frame)),
-                        String::new(),
-                        String::new(),
-                    )
-                }
-                StepStatus::Passed(d) => (
-                    format!("{}", self.theme.pass_glyph()),
-                    String::new(),
-                    format!("{:.1}s", d.as_secs_f64()),
-                ),
-                StepStatus::Failed(d, diag) => {
-                    let d_str = format!("{:.1}s", d.as_secs_f64());
-                    let diag_str = if diag.is_empty() {
-                        String::new()
-                    } else {
-                        format!("{}", self.theme.dim(diag))
-                    };
-                    (format!("{}", self.theme.fail_glyph()), diag_str, d_str)
-                }
-                StepStatus::Skipped => (
-                    format!("{}", self.theme.skip_glyph()),
-                    format!("{}", self.theme.dim("skipped")),
-                    String::new(),
-                ),
-            };
-
-            let arrow = if i == self.cursor && !self.theme.color_enabled() {
-                "▶"
-            } else {
-                "▸"
-            };
-            let raw_prefix = format!("{arrow} {:nw$}", name, nw = self.name_width);
-            let styled_prefix = if i == self.cursor && self.browse_active {
-                format!("{}", self.theme.selected(&raw_prefix))
-            } else {
-                raw_prefix
-            };
-
-            let left = if diagnostic.is_empty() {
-                format!("{styled_prefix}  {glyph}")
-            } else {
-                format!("{styled_prefix}  {glyph}   {diagnostic}")
-            };
-
-            let (step_text, step_rows) = if duration_str.is_empty() {
-                let r = Self::visual_rows_for(&left, width) as usize;
-                (left, r)
-            } else {
-                let right = format!("{}", self.theme.dim(&duration_str));
-                let left_vis = visible_len(&left);
-                let right_vis = visible_len(&right);
-                let pad = width.saturating_sub(left_vis + right_vis);
-                let line = format!("{left}{:pad$}{right}", "");
-                let r = Self::visual_rows_for(&line, width) as usize;
-                (line, r)
-            };
+        for i in 0..self.step_names.len() {
+            let (step_text, step_rows) = self.step_row(i, width);
 
             if i == self.cursor {
                 cursor_top_row = cumulative;
