@@ -866,6 +866,62 @@ impl TtyDisplay {
         out
     }
 
+    /// Builds the persistent browse-mode footer: post-run summary, optional
+    /// `[on_failure]` hook block, help bar (or help modal when active), and
+    /// the transient one-shot status message. Returns an empty Vec when
+    /// browse mode is not active so the caller can append unconditionally.
+    fn footer_lines(&self, width: usize) -> Vec<(String, usize)> {
+        if !self.browse_active {
+            return Vec::new();
+        }
+
+        let mut out: Vec<(String, usize)> = Vec::new();
+        out.push((String::new(), 1)); // spacer before the footer
+
+        if !self.run_summary.is_empty() {
+            let r = Self::visual_rows_for(&self.run_summary, width) as usize;
+            out.push((self.run_summary.clone(), r));
+            out.push((String::new(), 1));
+        }
+
+        // Hook slot: "running…" while in flight; output once settled. Only
+        // one of the two is shown at a time.
+        if self.hook_running {
+            let line = format!("  {}", self.theme.dim("running on_failure hook…"));
+            let r = Self::visual_rows_for(&line, width) as usize;
+            out.push((line, r));
+            out.push((String::new(), 1));
+        } else if !self.hook_output_text.is_empty() {
+            for line in self.hook_output_text.lines() {
+                let styled = format!("  {}", self.theme.dim(line));
+                let r = Self::visual_rows_for(&styled, width) as usize;
+                out.push((styled, r));
+            }
+            out.push((String::new(), 1));
+        }
+
+        if self.help_modal_active {
+            for line in self.help_modal_lines() {
+                let r = Self::visual_rows_for(&line, width) as usize;
+                out.push((line, r));
+            }
+        } else {
+            // Grouped, symbol-led, fits ~80 cols.
+            let help = "  ↕ j/k   ⏎ toggle   ▸ n/p/e   ↺ r/f/c   ? help · q quit";
+            let help_styled = format!("{}", self.theme.dim(help));
+            let r = Self::visual_rows_for(&help_styled, width) as usize;
+            out.push((help_styled, r));
+        }
+
+        if let Some(msg) = &self.transient_message {
+            let line = format!("  {}", self.theme.yellow(msg));
+            let r = Self::visual_rows_for(&line, width) as usize;
+            out.push((line, r));
+        }
+
+        out
+    }
+
     /// Redraws the step list for browse mode: includes cursor highlight and
     /// inline expanded output for toggled steps. Clipped to terminal height
     /// via a scroll viewport that always keeps the cursor step visible.
@@ -903,57 +959,9 @@ impl TtyDisplay {
             }
         }
 
-        if self.browse_active {
-            // Spacer before the footer.
-            all_lines.push((String::new(), 1));
-            cumulative += 1;
-            if !self.run_summary.is_empty() {
-                let r = Self::visual_rows_for(&self.run_summary, width) as usize;
-                all_lines.push((self.run_summary.clone(), r));
-                cumulative += r;
-                all_lines.push((String::new(), 1));
-                cumulative += 1;
-            }
-            // Hook slot: "running…" while in flight; output once settled.
-            // Only one of the two is shown at a time.
-            if self.hook_running {
-                let line = format!("  {}", self.theme.dim("running on_failure hook…"));
-                let r = Self::visual_rows_for(&line, width) as usize;
-                all_lines.push((line, r));
-                cumulative += r;
-                all_lines.push((String::new(), 1));
-                cumulative += 1;
-            } else if !self.hook_output_text.is_empty() {
-                for line in self.hook_output_text.lines() {
-                    let styled = format!("  {}", self.theme.dim(line));
-                    let r = Self::visual_rows_for(&styled, width) as usize;
-                    all_lines.push((styled, r));
-                    cumulative += r;
-                }
-                all_lines.push((String::new(), 1));
-                cumulative += 1;
-            }
-            if self.help_modal_active {
-                for line in self.help_modal_lines() {
-                    let r = Self::visual_rows_for(&line, width) as usize;
-                    all_lines.push((line, r));
-                    cumulative += r;
-                }
-            } else {
-                // Option B: grouped, symbol-led, fits ~80 cols.
-                let help = "  ↕ j/k   ⏎ toggle   ▸ n/p/e   ↺ r/f/c   ? help · q quit";
-                let help_styled = format!("{}", self.theme.dim(help));
-                let r = Self::visual_rows_for(&help_styled, width) as usize;
-                all_lines.push((help_styled, r));
-                cumulative += r;
-            }
-
-            if let Some(msg) = &self.transient_message {
-                let line = format!("  {}", self.theme.yellow(msg));
-                let r = Self::visual_rows_for(&line, width) as usize;
-                all_lines.push((line, r));
-                cumulative += r;
-            }
+        for (line, r) in self.footer_lines(width) {
+            cumulative += r;
+            all_lines.push((line, r));
         }
 
         // ── Adjust scroll so cursor step stays in viewport ───────────────
