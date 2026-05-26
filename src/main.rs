@@ -316,3 +316,32 @@ fn run_init() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// `run_init` writes a `.baraddur.toml` into the current working
+    /// directory. The test temporarily relocates cwd into a tempdir so the
+    /// real project file is never touched. cwd is restored before any
+    /// assertions so a failure here doesn't poison sibling tests.
+    #[test]
+    fn run_init_writes_starter_config_into_cwd() {
+        let td = TempDir::new().unwrap();
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(td.path()).unwrap();
+
+        let _exit = run_init();
+
+        std::env::set_current_dir(&original).unwrap();
+
+        let written = td.path().join(".baraddur.toml");
+        assert!(
+            written.exists(),
+            "run_init should write a starter config at {}",
+            written.display()
+        );
+        assert!(std::fs::metadata(&written).unwrap().len() > 0);
+    }
+}

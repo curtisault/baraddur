@@ -1842,6 +1842,232 @@ mod tests {
         assert!(!out.contains("[38;5;10m") && !out.contains("[2m"));
     }
 
+    #[test]
+    fn step_row_queued_shows_glyph_only() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        // Default status after run_started is Queued.
+
+        let (line, rows) = d.step_row(0, 80);
+        let plain = strip_ansi(&line);
+        assert_eq!(rows, 1);
+        assert!(
+            plain.contains("check"),
+            "row should contain step name: {plain:?}"
+        );
+        // Queued state: no duration, no diagnostic.
+        assert!(
+            !plain.contains('s'),
+            "queued row should not show duration: {plain:?}"
+        );
+    }
+
+    #[test]
+    fn step_row_passed_appends_right_aligned_duration() {
+        use super::super::style::{strip_ansi, visible_len};
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.statuses[0] = StepStatus::Passed(Duration::from_millis(1500));
+
+        let (line, rows) = d.step_row(0, 80);
+        let plain = strip_ansi(&line);
+        assert_eq!(rows, 1);
+        assert!(plain.contains("check"));
+        assert!(
+            plain.ends_with("1.5s"),
+            "duration should be right-aligned: {plain:?}"
+        );
+        // Total width should match the requested width (padded between cols).
+        assert_eq!(visible_len(&line), 80);
+    }
+
+    #[test]
+    fn step_row_failed_with_diagnostic_includes_diag_text() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.statuses[0] = StepStatus::Failed(Duration::from_millis(2300), "boom".into());
+
+        let (line, _rows) = d.step_row(0, 80);
+        let plain = strip_ansi(&line);
+        assert!(plain.contains("check"));
+        assert!(plain.contains("boom"), "diagnostic text missing: {plain:?}");
+        assert!(plain.ends_with("2.3s"));
+    }
+
+    #[test]
+    fn step_row_cursor_uses_filled_arrow_in_no_color_mode() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string(), "b".to_string()]);
+        d.cursor = 1;
+
+        let (cursor_line, _) = d.step_row(1, 80);
+        let (other_line, _) = d.step_row(0, 80);
+        assert!(
+            strip_ansi(&cursor_line).contains("▶"),
+            "NO_COLOR cursor row should use filled `▶`: {cursor_line:?}"
+        );
+        assert!(
+            !strip_ansi(&other_line).contains("▶"),
+            "non-cursor rows should use hollow `▸`: {other_line:?}"
+        );
+    }
+
+    #[test]
+    fn expanded_output_lines_empty_when_not_expanded() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.step_outputs[0] = "  some output\n".into();
+        // expanded[0] stays false.
+
+        assert!(d.expanded_output_lines(0, 80).is_empty());
+    }
+
+    #[test]
+    fn expanded_output_lines_empty_when_no_captured_output() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.expanded[0] = true;
+        // step_outputs[0] is empty by default.
+
+        assert!(d.expanded_output_lines(0, 80).is_empty());
+    }
+
+    #[test]
+    fn expanded_output_lines_emits_one_entry_per_line() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.expanded[0] = true;
+        d.step_outputs[0] = "  line one\n  line two\n  line three\n".into();
+
+        let lines = d.expanded_output_lines(0, 80);
+        assert_eq!(lines.len(), 3);
+        // Non-diagnostic lines pass through unchanged (with their leading "  ").
+        assert_eq!(lines[0].0, "  line one");
+        assert_eq!(lines[1].0, "  line two");
+        assert_eq!(lines[2].0, "  line three");
+    }
+
+    #[test]
+    fn expanded_output_lines_highlights_current_diagnostic_on_cursor_step() {
+        use super::super::style::strip_ansi;
+        use crate::output::diagnostic::Diagnostic;
+        use std::path::PathBuf;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.cursor = 0;
+        d.expanded[0] = true;
+        d.step_outputs[0] = "  src/foo.rs:10:5: error: bad\n".into();
+        d.parsed_diagnostics[0] = vec![Diagnostic {
+            path: PathBuf::from("src/foo.rs"),
+            line: 10,
+            col: Some(5),
+        }];
+        d.current_diagnostic[0] = 0;
+
+        let lines = d.expanded_output_lines(0, 80);
+        assert_eq!(lines.len(), 1);
+        // In NO_COLOR mode the current-diagnostic marker is the filled `▶`.
+        let plain = strip_ansi(&lines[0].0);
+        assert!(
+            plain.starts_with("▶ "),
+            "current diag should lead with `▶ `: {plain:?}"
+        );
+        assert!(plain.contains("src/foo.rs:10:5"));
+    }
+
+    #[test]
+    fn footer_lines_empty_when_browse_not_active() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.run_summary = "1 passed".into();
+        // browse_active stays false.
+
+        assert!(d.footer_lines(80).is_empty());
+    }
+
+    #[test]
+    fn footer_lines_includes_summary_help_bar_and_spacer() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.browse_active = true;
+        d.run_summary = "1 passed in 1.2s".into();
+
+        let lines = d.footer_lines(80);
+        let plain: Vec<String> = lines.iter().map(|(s, _)| strip_ansi(s)).collect();
+        // Leading spacer, then summary, then blank, then help bar.
+        assert_eq!(plain[0], "");
+        assert!(plain.iter().any(|l| l.contains("1 passed in 1.2s")));
+        assert!(
+            plain.iter().any(|l| l.contains("q quit")),
+            "help bar missing from footer: {plain:#?}"
+        );
+    }
+
+    #[test]
+    fn footer_lines_swaps_help_bar_for_help_modal_when_active() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.browse_active = true;
+        d.help_modal_active = true;
+
+        let lines = d.footer_lines(80);
+        let plain: Vec<String> = lines.iter().map(|(s, _)| strip_ansi(s)).collect();
+        assert!(
+            plain.iter().any(|l| l.contains("press any key to dismiss")),
+            "expected modal footer line: {plain:#?}"
+        );
+        assert!(
+            !plain.iter().any(|l| l.contains("q quit")),
+            "help bar should not appear while modal is active: {plain:#?}"
+        );
+    }
+
+    #[test]
+    fn footer_lines_renders_hook_running_block_while_in_flight() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.browse_active = true;
+        d.hook_running = true;
+
+        let lines = d.footer_lines(80);
+        let plain: Vec<String> = lines.iter().map(|(s, _)| strip_ansi(s)).collect();
+        assert!(
+            plain.iter().any(|l| l.contains("running on_failure hook")),
+            "in-flight hook line missing: {plain:#?}"
+        );
+    }
+
+    #[test]
+    fn footer_lines_appends_transient_message_at_end() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.browse_active = true;
+        d.transient_message = Some("no failures to rerun".into());
+
+        let lines = d.footer_lines(80);
+        let last = strip_ansi(&lines.last().unwrap().0);
+        assert!(
+            last.contains("no failures to rerun"),
+            "transient message should be the last footer entry: {last:?}"
+        );
+    }
+
     /// restore_signals_and_output must turn OPOST and ISIG back on, even if
     /// they had been cleared (as crossterm's enable_raw_mode would).
     #[test]
