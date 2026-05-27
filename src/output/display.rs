@@ -1056,6 +1056,63 @@ impl TtyDisplay {
             format!("{}", self.theme.dim(&self.run_divider))
         }
     }
+
+    /// Captures stdout/stderr from each result into the browse buffer and
+    /// initialises browse-mode state: failed steps are pre-expanded,
+    /// diagnostics parsed off the full (untruncated) output, cursor moved
+    /// to the first failing step. Mutates `&mut self`; no terminal I/O.
+    fn capture_step_outputs(&mut self, results: &[StepResult]) {
+        for r in results {
+            if let Some(idx) = self.step_names.iter().position(|n| n == &r.name) {
+                self.step_outputs[idx] = format_truncated_output(&r.stdout, &r.stderr);
+                self.expanded[idx] = !r.success;
+                let combined = if r.stderr.is_empty() {
+                    r.stdout.clone()
+                } else if r.stdout.is_empty() {
+                    r.stderr.clone()
+                } else {
+                    format!("{}\n{}", r.stdout, r.stderr)
+                };
+                self.parsed_diagnostics[idx] = crate::output::diagnostic::parse(&combined);
+                self.current_diagnostic[idx] = 0;
+            }
+        }
+        self.cursor = results
+            .iter()
+            .find(|r| !r.success)
+            .and_then(|r| self.step_names.iter().position(|n| n == &r.name))
+            .unwrap_or(0);
+        self.all_expanded = results.iter().any(|r| !r.success);
+    }
+
+    /// Builds the colored summary line shown after a run — failed/passed/
+    /// skipped counts and the elapsed wall-clock, joined by `·`. Pure over
+    /// `&self`; output is a single styled string ready for `println!`.
+    fn summary_line(&self, results: &[StepResult], elapsed: f64) -> String {
+        let failed = results.iter().filter(|r| !r.success).count();
+        let passed = results.iter().filter(|r| r.success).count();
+        let skipped = self.step_names.len().saturating_sub(results.len());
+
+        let mut parts: Vec<String> = Vec::new();
+        if failed > 0 {
+            let s = format!("{failed} failed");
+            parts.push(format!("{}", self.theme.red(&s)));
+        }
+        let s = format!("{passed} passed");
+        parts.push(format!("{}", self.theme.green(&s)));
+        if skipped > 0 {
+            let s = format!("{skipped} skipped");
+            parts.push(format!("{}", self.theme.dim(&s)));
+        }
+        let time_str = if failed == 0 {
+            format!("all passing · {elapsed:.1}s")
+        } else {
+            format!("{elapsed:.1}s")
+        };
+        parts.push(format!("{}", self.theme.dim(&time_str)));
+
+        parts.join(" · ")
+    }
 }
 
 impl Display for TtyDisplay {
@@ -1212,40 +1269,13 @@ impl Display for TtyDisplay {
         // and replace them cleanly in one pass.
         self.has_running = false;
 
-        // Capture outputs and set initial browse state.
-        for r in results {
-            if let Some(idx) = self.step_names.iter().position(|n| n == &r.name) {
-                self.step_outputs[idx] = format_truncated_output(&r.stdout, &r.stderr);
-                self.expanded[idx] = !r.success;
-                // Parse diagnostics from the full (untruncated) output so
-                // entries hidden by elision are still navigable via n/p.
-                let combined = if r.stderr.is_empty() {
-                    r.stdout.clone()
-                } else if r.stdout.is_empty() {
-                    r.stderr.clone()
-                } else {
-                    format!("{}\n{}", r.stdout, r.stderr)
-                };
-                self.parsed_diagnostics[idx] = crate::output::diagnostic::parse(&combined);
-                self.current_diagnostic[idx] = 0;
-            }
-        }
-        self.cursor = results
-            .iter()
-            .find(|r| !r.success)
-            .and_then(|r| self.step_names.iter().position(|n| n == &r.name))
-            .unwrap_or(0);
-        self.all_expanded = results.iter().any(|r| !r.success);
+        self.capture_step_outputs(results);
 
         if self.verbosity == Verbosity::Quiet && results.iter().all(|r| r.success) {
             self.rendered_lines = 0;
             return;
         }
 
-        // Footer only — output is shown inline in browse mode, not duplicated here.
-        let failed = results.iter().filter(|r| !r.success).count();
-        let passed = results.iter().filter(|r| r.success).count();
-        let skipped = self.step_names.len().saturating_sub(results.len());
         let elapsed = self
             .run_start
             .take()
@@ -1255,25 +1285,7 @@ impl Display for TtyDisplay {
         println!();
         self.rendered_lines += 1;
 
-        let mut parts: Vec<String> = Vec::new();
-        if failed > 0 {
-            let s = format!("{failed} failed");
-            parts.push(format!("{}", self.theme.red(&s)));
-        }
-        let s = format!("{passed} passed");
-        parts.push(format!("{}", self.theme.green(&s)));
-        if skipped > 0 {
-            let s = format!("{skipped} skipped");
-            parts.push(format!("{}", self.theme.dim(&s)));
-        }
-        let time_str = if failed == 0 {
-            format!("all passing · {elapsed:.1}s")
-        } else {
-            format!("{elapsed:.1}s")
-        };
-        parts.push(format!("{}", self.theme.dim(&time_str)));
-
-        let summary = parts.join(" · ");
+        let summary = self.summary_line(results, elapsed);
         self.run_summary = summary.clone();
         println!("{summary}");
         let width = Self::term_width();
@@ -2158,6 +2170,126 @@ mod tests {
             .position(|l| l.contains('a'))
             .expect("step row missing");
         assert!(step_idx < summary_idx, "footer should follow step block");
+    }
+
+    #[test]
+    fn capture_step_outputs_expands_failed_steps_and_points_cursor_to_first_fail() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string(), "b".to_string(), "c".to_string()]);
+
+        let results = vec![
+            mk_step_result(true, Some(0), "", ""),
+            mk_step_result(false, Some(1), "boom\n", ""),
+            mk_step_result(true, Some(0), "", ""),
+        ];
+        // Names need to match step_names for the lookup to find them.
+        let results: Vec<StepResult> = results
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut r)| {
+                r.name = d.step_names[i].clone();
+                r
+            })
+            .collect();
+
+        d.capture_step_outputs(&results);
+
+        assert_eq!(d.expanded, vec![false, true, false]);
+        // Cursor lands on step "b" (the first failing step).
+        assert_eq!(d.cursor, 1);
+        assert!(d.all_expanded, "any failure should set all_expanded");
+        assert!(
+            d.step_outputs[1].contains("boom"),
+            "captured output should preserve content: {:?}",
+            d.step_outputs[1]
+        );
+    }
+
+    #[test]
+    fn capture_step_outputs_keeps_cursor_at_zero_when_all_passed() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string(), "b".to_string()]);
+
+        let mut results = vec![
+            mk_step_result(true, Some(0), "", ""),
+            mk_step_result(true, Some(0), "", ""),
+        ];
+        results[0].name = "a".into();
+        results[1].name = "b".into();
+
+        d.capture_step_outputs(&results);
+
+        assert_eq!(d.cursor, 0);
+        assert!(!d.all_expanded);
+        assert_eq!(d.expanded, vec![false, false]);
+    }
+
+    #[test]
+    fn summary_line_formats_all_passing_branch() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string(), "b".to_string()]);
+        let mut results = vec![
+            mk_step_result(true, Some(0), "", ""),
+            mk_step_result(true, Some(0), "", ""),
+        ];
+        results[0].name = "a".into();
+        results[1].name = "b".into();
+
+        let line = strip_ansi(&d.summary_line(&results, 1.2));
+        assert!(line.contains("2 passed"), "missing pass count: {line:?}");
+        assert!(
+            line.contains("all passing · 1.2s"),
+            "missing time suffix: {line:?}"
+        );
+        assert!(!line.contains("failed"));
+    }
+
+    #[test]
+    fn summary_line_leads_with_failed_count_when_any_failed() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string(), "b".to_string()]);
+        let mut results = vec![
+            mk_step_result(false, Some(1), "boom\n", ""),
+            mk_step_result(true, Some(0), "", ""),
+        ];
+        results[0].name = "a".into();
+        results[1].name = "b".into();
+
+        let line = strip_ansi(&d.summary_line(&results, 0.5));
+        // Failed count comes first, then passed, then time without
+        // the "all passing" prefix.
+        assert!(
+            line.starts_with("1 failed"),
+            "wrong leading token: {line:?}"
+        );
+        assert!(line.contains("1 passed"));
+        assert!(
+            line.ends_with("0.5s"),
+            "expected bare time suffix: {line:?}"
+        );
+        assert!(!line.contains("all passing"));
+    }
+
+    #[test]
+    fn summary_line_includes_skipped_when_some_steps_missing_from_results() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string(), "b".to_string(), "c".to_string()]);
+        // Only one result for a 3-step pipeline → 2 skipped.
+        let mut results = vec![mk_step_result(true, Some(0), "", "")];
+        results[0].name = "a".into();
+
+        let line = strip_ansi(&d.summary_line(&results, 1.0));
+        assert!(line.contains("1 passed"));
+        assert!(
+            line.contains("2 skipped"),
+            "missing skipped count: {line:?}"
+        );
     }
 
     /// restore_signals_and_output must turn OPOST and ISIG back on, even if
