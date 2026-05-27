@@ -436,10 +436,7 @@ impl App {
                         // stays in browse until a file change or `q`.
                         res = await_hook(&mut hook_handle), if hook_handle.is_some() => {
                             hook_handle = None;
-                            match res {
-                                Ok(Ok(Some(text))) => display.hook_output(&text),
-                                _ => display.hook_finished(),
-                            }
+                            apply_hook_result(res, display.as_mut());
                         }
                     }
                 }
@@ -482,10 +479,7 @@ impl App {
 
                     res = await_hook(&mut hook_handle), if hook_handle.is_some() => {
                         hook_handle = None;
-                        match res {
-                            Ok(Ok(Some(text))) => display.hook_output(&text),
-                            _ => display.hook_finished(),
-                        }
+                        apply_hook_result(res, display.as_mut());
                         // continue idle loop — wait for next event
                     }
                 }
@@ -526,6 +520,18 @@ fn cancel_hook(hook_handle: &mut Option<HookHandle>, display: &mut dyn Display) 
     if let Some(h) = hook_handle.take() {
         h.abort();
         display.hook_finished();
+    }
+}
+
+/// Routes a settled hook's result to the display: forwards captured output
+/// when present, otherwise clears the "running…" footer slot.
+fn apply_hook_result(
+    res: std::result::Result<Result<Option<String>>, tokio::task::JoinError>,
+    display: &mut dyn Display,
+) {
+    match res {
+        Ok(Ok(Some(text))) => display.hook_output(&text),
+        _ => display.hook_finished(),
     }
 }
 
