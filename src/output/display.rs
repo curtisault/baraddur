@@ -2292,6 +2292,152 @@ mod tests {
         );
     }
 
+    /// Convenience: drive a single key through `handle_key` against a
+    /// `TtyDisplay` already initialised with the named steps.
+    fn dispatch(d: &mut TtyDisplay, ch: char) -> BrowseAction {
+        use crossterm::event::{KeyEvent, KeyModifiers};
+        d.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn handle_key_j_moves_cursor_down_and_clamps_at_last_step() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string(), "b".to_string(), "c".to_string()]);
+
+        assert!(matches!(dispatch(&mut d, 'j'), BrowseAction::Redraw));
+        assert_eq!(d.cursor, 1);
+        dispatch(&mut d, 'j');
+        dispatch(&mut d, 'j'); // would overshoot — should clamp at n-1.
+        assert_eq!(d.cursor, 2);
+    }
+
+    #[test]
+    fn handle_key_k_moves_cursor_up_and_clamps_at_zero() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string(), "b".to_string()]);
+        d.cursor = 1;
+
+        assert!(matches!(dispatch(&mut d, 'k'), BrowseAction::Redraw));
+        assert_eq!(d.cursor, 0);
+        dispatch(&mut d, 'k'); // saturating — stays at 0.
+        assert_eq!(d.cursor, 0);
+    }
+
+    #[test]
+    fn handle_key_gg_chord_jumps_cursor_to_top() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string(), "b".to_string(), "c".to_string()]);
+        d.cursor = 2;
+
+        // First `g` is a Noop, just primes the chord.
+        assert!(matches!(dispatch(&mut d, 'g'), BrowseAction::Noop));
+        assert_eq!(d.cursor, 2);
+        // Second `g` triggers the jump.
+        assert!(matches!(dispatch(&mut d, 'g'), BrowseAction::Redraw));
+        assert_eq!(d.cursor, 0);
+    }
+
+    #[test]
+    fn handle_key_capital_g_jumps_cursor_to_bottom() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string(), "b".to_string(), "c".to_string()]);
+        d.cursor = 0;
+
+        assert!(matches!(dispatch(&mut d, 'G'), BrowseAction::Redraw));
+        assert_eq!(d.cursor, 2);
+    }
+
+    #[test]
+    fn handle_key_enter_toggles_expansion_at_cursor() {
+        use crossterm::event::{KeyEvent, KeyModifiers};
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string(), "b".to_string()]);
+        d.cursor = 1;
+        assert!(!d.expanded[1]);
+
+        d.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(d.expanded[1]);
+        assert!(!d.expanded[0], "only the cursor step should toggle");
+        d.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!d.expanded[1], "second press should toggle off");
+    }
+
+    #[test]
+    fn handle_key_o_toggles_same_as_enter() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string()]);
+        assert!(!d.expanded[0]);
+        dispatch(&mut d, 'o');
+        assert!(d.expanded[0]);
+    }
+
+    #[test]
+    fn handle_key_capital_o_toggles_expansion_for_all_steps() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert!(d.expanded.iter().all(|e| !e));
+
+        dispatch(&mut d, 'O');
+        assert!(d.expanded.iter().all(|e| *e), "all should expand");
+        dispatch(&mut d, 'O');
+        assert!(d.expanded.iter().all(|e| !e), "all should collapse");
+    }
+
+    #[test]
+    fn handle_key_q_returns_quit() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string()]);
+        assert!(matches!(dispatch(&mut d, 'q'), BrowseAction::Quit));
+    }
+
+    #[test]
+    fn handle_key_q_returns_quit_even_with_no_steps() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        // No run_started → step_names is empty.
+        assert!(matches!(dispatch(&mut d, 'q'), BrowseAction::Quit));
+    }
+
+    #[test]
+    fn handle_key_r_returns_rerun() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string()]);
+        assert!(matches!(dispatch(&mut d, 'r'), BrowseAction::Rerun));
+    }
+
+    #[test]
+    fn handle_key_f_with_failures_returns_rerun_failed() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string()]);
+        d.statuses[0] = StepStatus::Failed(Duration::from_secs(0), "boom".into());
+
+        assert!(matches!(dispatch(&mut d, 'f'), BrowseAction::RerunFailed));
+    }
+
+    #[test]
+    fn handle_key_f_without_failures_sets_transient_message_and_redraws() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string()]);
+        d.statuses[0] = StepStatus::Passed(Duration::from_secs(0));
+
+        assert!(matches!(dispatch(&mut d, 'f'), BrowseAction::Redraw));
+        assert_eq!(
+            d.transient_message.as_deref(),
+            Some("no failures to re-run")
+        );
+    }
+
+    #[test]
+    fn handle_key_unknown_key_clears_visible_message_and_promotes_to_redraw() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string()]);
+        d.transient_message = Some("stale".into());
+
+        // `x` is unrecognised — would normally be Noop, but the visible
+        // message needs a redraw to disappear.
+        assert!(matches!(dispatch(&mut d, 'x'), BrowseAction::Redraw));
+        assert!(d.transient_message.is_none());
+    }
+
     /// restore_signals_and_output must turn OPOST and ISIG back on, even if
     /// they had been cleared (as crossterm's enable_raw_mode would).
     #[test]
