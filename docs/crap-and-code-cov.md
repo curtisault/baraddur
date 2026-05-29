@@ -16,20 +16,20 @@ The cleanup plan for the remaining flagged functions lives in
 
 <!-- cargo-crap-report -->
 
-## ⚠️ 4 function(s) exceed CRAP threshold 30
+## ⚠️ 3 function(s) exceed CRAP threshold 30
 
 | | CRAP | CC | Cov % | Function | Location |
 |---|---:|---:|---:|---|---|
 | ✗ | 101.9 | 21 | 43.2 | `App::run_until` | `./src/lib.rs:198` |
-| ✗ | 72.0 | 8 | 0.0 | `TtyDisplay::browse_redraw` | `./src/output/display.rs:971` |
-| ✗ | 72.0 | 8 | 0.0 | `TtyDisplay::run_finished` | `./src/output/display.rs:1266` |
-| ✗ | 37.4 | 13 | 47.5 | `TtyDisplay::redraw` | `./src/output/display.rs:653` |
-| ▲ | 26.2 | 26 | 93.2 | `TtyDisplay::handle_key` | `./src/output/display.rs:1363` |
+| ✗ | 72.0 | 8 | 0.0 | `TtyDisplay::run_finished` | `./src/output/display.rs:1301` |
+| ✗ | 56.0 | 7 | 0.0 | `TtyDisplay::browse_redraw` | `./src/output/display.rs:1016` |
+| ▲ | 28.1 | 12 | 51.9 | `TtyDisplay::redraw` | `./src/output/display.rs:705` |
+| ▲ | 26.2 | 26 | 93.2 | `TtyDisplay::handle_key` | `./src/output/display.rs:1398` |
 | ▲ | 21.0 | 20 | 86.4 | `validate` | `./src/config/validate.rs:25` |
 | ▲ | 20.3 | 8 | 42.3 | `format_truncated_output` | `./src/output/display.rs:64` |
 | ▲ | 20.0 | 20 | 95.9 | `main` | `./src/main.rs:140` |
 | ▲ | 19.0 | 19 | 95.7 | `parse_path_line_col` | `./src/output/diagnostic.rs:79` |
-| ▲ | 15.3 | 13 | 76.0 | `TtyDisplay::step_row` | `./src/output/display.rs:743` |
+| ▲ | 15.3 | 13 | 76.0 | `TtyDisplay::step_row` | `./src/output/display.rs:788` |
 | ▲ | 13.3 | 11 | 73.3 | `PlainDisplay::run_finished` | `./src/output/display.rs:262` |
 | ▲ | 12.0 | 3 | 0.0 | `exec_wrapped` | `./src/lib.rs:609` |
 | ▲ | 12.0 | 3 | 0.0 | `default_editor_spawn` | `./src/output/display.rs:131` |
@@ -40,62 +40,63 @@ The cleanup plan for the remaining flagged functions lives in
 | ▲ | 11.1 | 11 | 91.1 | `run_hook` | `./src/pipeline/hook.rs:57` |
 | ▲ | 10.5 | 6 | 50.0 | `load` | `./src/config/mod.rs:71` |
 | ✓ | 10.0 | 10 | 100.0 | `filter_and_template` | `./src/pipeline/filter.rs:23` |
+| ✓ | 9.8 | 4 | 28.6 | `TtyDisplay::prepare_redraw_region` | `./src/output/display.rs:526` |
 | ✓ | 9.4 | 9 | 83.3 | `extract_line` | `./src/output/diagnostic.rs:45` |
-| ✓ | 9.2 | 9 | 86.0 | `TtyDisplay::footer_lines` | `./src/output/display.rs:873` |
+| ✓ | 9.2 | 9 | 86.0 | `TtyDisplay::footer_lines` | `./src/output/display.rs:918` |
 | ✓ | 9.0 | 9 | 97.1 | `App::run_once` | `./src/lib.rs:118` |
 | ✓ | 9.0 | 9 | 100.0 | `run_pipeline` | `./src/pipeline/runner.rs:27` |
 | ✓ | 8.0 | 8 | 94.1 | `matches_filters` | `./src/watcher/mod.rs:70` |
 | ✓ | 8.0 | 8 | 95.2 | `resolve_trigger` | `./src/main.rs:224` |
 | ✓ | 8.0 | 8 | 100.0 | `short_diagnostic` | `./src/output/display.rs:100` |
-| ✓ | 8.0 | 8 | 100.0 | `TtyDisplay::help_modal_lines` | `./src/output/display.rs:554` |
+| ✓ | 8.0 | 8 | 100.0 | `TtyDisplay::help_modal_lines` | `./src/output/display.rs:606` |
 | ✓ | 8.0 | 7 | 73.1 | `write_run_log` | `./src/lib.rs:566` |
-| ✓ | 7.1 | 7 | 88.2 | `TtyDisplay::expanded_output_lines` | `./src/output/display.rs:816` |
+| ✓ | 7.1 | 7 | 88.2 | `TtyDisplay::expanded_output_lines` | `./src/output/display.rs:861` |
 | ✓ | 7.0 | 7 | 91.4 | `not_found_error` | `./src/config/mod.rs:138` |
 | ✓ | 7.0 | 7 | 92.3 | `combine_failed_output` | `./src/pipeline/hook.rs:17` |
 | ✓ | 7.0 | 7 | 100.0 | `load_from` | `./src/config/mod.rs:95` |
 | ✓ | 7.0 | 5 | 57.1 | `run_init` | `./src/main.rs:300` |
 | ✓ | 6.3 | 5 | 62.5 | `Cli::verbosity` | `./src/main.rs:126` |
 | ✓ | 6.0 | 2 | 0.0 | `PlainDisplay::run_cancelled` | `./src/output/display.rs:256` |
-| ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::raw_mode_on` | `./src/output/display.rs:510` |
-| ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::raw_mode_off` | `./src/output/display.rs:523` |
-| ✓ | 6.0 | 6 | 100.0 | `TtyDisplay::compute_lines` | `./src/output/display.rs:929` |
-| ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::step_finished` | `./src/output/display.rs:1237` |
-| ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::steps_skipped` | `./src/output/display.rs:1252` |
-| ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::tick` | `./src/output/display.rs:1310` |
-| ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::browse_redraw_if_active` | `./src/output/display.rs:1333` |
-| ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::hook_output` | `./src/output/display.rs:1339` |
-| ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::hook_started` | `./src/output/display.rs:1349` |
-| ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::hook_finished` | `./src/output/display.rs:1356` |
+| ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::raw_mode_on` | `./src/output/display.rs:562` |
+| ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::raw_mode_off` | `./src/output/display.rs:575` |
+| ✓ | 6.0 | 6 | 100.0 | `TtyDisplay::compute_lines` | `./src/output/display.rs:974` |
+| ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::step_finished` | `./src/output/display.rs:1272` |
+| ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::steps_skipped` | `./src/output/display.rs:1287` |
+| ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::tick` | `./src/output/display.rs:1345` |
+| ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::browse_redraw_if_active` | `./src/output/display.rs:1368` |
+| ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::hook_output` | `./src/output/display.rs:1374` |
+| ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::hook_started` | `./src/output/display.rs:1384` |
+| ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::hook_finished` | `./src/output/display.rs:1391` |
 | ✓ | 5.6 | 5 | 71.4 | `App::gate` | `./src/lib.rs:173` |
 | ✓ | 5.4 | 5 | 75.0 | `run` | `./src/pipeline/step.rs:29` |
 | ✓ | 5.3 | 3 | 36.4 | `PlainDisplay::hook_output` | `./src/output/display.rs:304` |
-| ✓ | 5.2 | 5 | 80.0 | `TtyDisplay::capture_step_outputs` | `./src/output/display.rs:1064` |
+| ✓ | 5.2 | 5 | 80.0 | `TtyDisplay::capture_step_outputs` | `./src/output/display.rs:1099` |
 | ✓ | 5.0 | 4 | 60.0 | `run_sequential_step` | `./src/pipeline/runner.rs:73` |
 | ✓ | 5.0 | 5 | 100.0 | `group_into_stages` | `./src/pipeline/mod.rs:35` |
 | ✓ | 5.0 | 5 | 100.0 | `ValidationErrors::fmt` | `./src/config/validate.rs:8` |
-| ✓ | 5.0 | 5 | 100.0 | `TtyDisplay::divider_styled` | `./src/output/display.rs:1038` |
+| ✓ | 5.0 | 5 | 100.0 | `TtyDisplay::divider_styled` | `./src/output/display.rs:1073` |
 | ✓ | 5.0 | 5 | 100.0 | `strip_ansi` | `./src/output/style.rs:112` |
 | ✓ | 4.1 | 4 | 83.3 | `format_trigger_suffix` | `./src/output/display.rs:153` |
 | ✓ | 4.1 | 4 | 84.2 | `repo_root` | `./src/git.rs:12` |
-| ✓ | 4.0 | 4 | 85.7 | `TtyDisplay::open_current_diagnostic` | `./src/output/display.rs:626` |
+| ✓ | 4.0 | 4 | 85.7 | `TtyDisplay::open_current_diagnostic` | `./src/output/display.rs:678` |
 | ✓ | 4.0 | 4 | 100.0 | `PlainDisplay::step_finished` | `./src/output/display.rs:229` |
-| ✓ | 4.0 | 4 | 100.0 | `TtyDisplay::summary_line` | `./src/output/display.rs:1091` |
+| ✓ | 4.0 | 4 | 100.0 | `TtyDisplay::summary_line` | `./src/output/display.rs:1126` |
 | ✓ | 4.0 | 4 | 100.0 | `parse` | `./src/output/diagnostic.rs:28` |
 | ✓ | 3.7 | 3 | 57.1 | `App::build_display` | `./src/lib.rs:96` |
 | ✓ | 3.4 | 3 | 64.7 | `run_git` | `./src/git.rs:57` |
-| ✓ | 3.3 | 2 | 30.6 | `TtyDisplay::banner` | `./src/output/display.rs:1123` |
-| ✓ | 3.3 | 3 | 68.8 | `TtyDisplay::with_terminal_released` | `./src/output/display.rs:533` |
-| ✓ | 3.1 | 3 | 77.8 | `TtyDisplay::drop` | `./src/output/display.rs:423` |
+| ✓ | 3.3 | 2 | 30.6 | `TtyDisplay::banner` | `./src/output/display.rs:1158` |
+| ✓ | 3.3 | 3 | 68.8 | `TtyDisplay::with_terminal_released` | `./src/output/display.rs:585` |
+| ✓ | 3.1 | 3 | 77.8 | `TtyDisplay::drop` | `./src/output/display.rs:427` |
 | ✓ | 3.0 | 3 | 85.7 | `await_hook` | `./src/lib.rs:507` |
-| ✓ | 3.0 | 3 | 86.0 | `TtyDisplay::run_started` | `./src/output/display.rs:1175` |
+| ✓ | 3.0 | 3 | 86.0 | `TtyDisplay::run_started` | `./src/output/display.rs:1210` |
 | ✓ | 3.0 | 3 | 87.5 | `apply_hook_result` | `./src/lib.rs:528` |
-| ✓ | 3.0 | 3 | 92.3 | `TtyDisplay::advance_diagnostic` | `./src/output/display.rs:608` |
+| ✓ | 3.0 | 3 | 92.3 | `TtyDisplay::advance_diagnostic` | `./src/output/display.rs:660` |
 | ✓ | 3.0 | 3 | 100.0 | `build_globset` | `./src/pipeline/filter.rs:64` |
 | ✓ | 3.0 | 3 | 100.0 | `walk_up` | `./src/config/discovery.rs:8` |
 | ✓ | 3.0 | 3 | 100.0 | `init` | `./src/config/mod.rs:127` |
 | ✓ | 3.0 | 3 | 100.0 | `apply_profile` | `./src/lib.rs:45` |
 | ✓ | 3.0 | 3 | 100.0 | `suppress_echo` | `./src/output/display.rs:29` |
-| ✓ | 3.0 | 3 | 100.0 | `TtyDisplay::visual_rows_for` | `./src/output/display.rs:497` |
+| ✓ | 3.0 | 3 | 100.0 | `TtyDisplay::visual_rows_for` | `./src/output/display.rs:502` |
 | ✓ | 3.0 | 3 | 100.0 | `Styled::fmt` | `./src/output/style.rs:22` |
 | ✓ | 3.0 | 3 | 100.0 | `diff_since` | `./src/git.rs:45` |
 | ✓ | 3.0 | 3 | 100.0 | `OutputFormat::from` | `./src/main.rs:117` |
@@ -110,13 +111,12 @@ The cleanup plan for the remaining flagged functions lives in
 | ✓ | 2.0 | 2 | 100.0 | `restore_signals_and_output` | `./src/output/display.rs:41` |
 | ✓ | 2.0 | 2 | 100.0 | `PlainDisplay::run_started` | `./src/output/display.rs:212` |
 | ✓ | 2.0 | 2 | 100.0 | `PlainDisplay::step_running` | `./src/output/display.rs:223` |
-| ✓ | 2.0 | 1 | 0.0 | `TtyDisplay::term_height` | `./src/output/display.rs:506` |
-| ✓ | 2.0 | 1 | 0.0 | `TtyDisplay::index_of` | `./src/output/display.rs:1028` |
-| ✓ | 2.0 | 1 | 0.0 | `TtyDisplay::set_trigger` | `./src/output/display.rs:1119` |
-| ✓ | 2.0 | 1 | 0.0 | `TtyDisplay::step_running` | `./src/output/display.rs:1230` |
-| ✓ | 2.0 | 1 | 0.0 | `TtyDisplay::run_cancelled` | `./src/output/display.rs:1260` |
-| ✓ | 2.0 | 1 | 0.0 | `TtyDisplay::enter_browse_mode` | `./src/output/display.rs:1317` |
-| ✓ | 2.0 | 1 | 0.0 | `TtyDisplay::exit_browse_mode` | `./src/output/display.rs:1324` |
+| ✓ | 2.0 | 1 | 0.0 | `TtyDisplay::index_of` | `./src/output/display.rs:1063` |
+| ✓ | 2.0 | 1 | 0.0 | `TtyDisplay::set_trigger` | `./src/output/display.rs:1154` |
+| ✓ | 2.0 | 1 | 0.0 | `TtyDisplay::step_running` | `./src/output/display.rs:1265` |
+| ✓ | 2.0 | 1 | 0.0 | `TtyDisplay::run_cancelled` | `./src/output/display.rs:1295` |
+| ✓ | 2.0 | 1 | 0.0 | `TtyDisplay::enter_browse_mode` | `./src/output/display.rs:1352` |
+| ✓ | 2.0 | 1 | 0.0 | `TtyDisplay::exit_browse_mode` | `./src/output/display.rs:1359` |
 | ✓ | 2.0 | 2 | 100.0 | `should_color` | `./src/output/style.rs:8` |
 | ✓ | 2.0 | 2 | 100.0 | `Theme::style` | `./src/output/style.rs:45` |
 | ✓ | 2.0 | 1 | 0.0 | `Theme::skip_glyph` | `./src/output/style.rs:65` |
@@ -140,9 +140,10 @@ The cleanup plan for the remaining flagged functions lives in
 | ✓ | 1.0 | 1 | 100.0 | `PlainDisplay::new` | `./src/output/display.rs:178` |
 | ✓ | 1.0 | 1 | 100.0 | `PlainDisplay::set_trigger` | `./src/output/display.rs:191` |
 | ✓ | 1.0 | 1 | 100.0 | `PlainDisplay::banner` | `./src/output/display.rs:195` |
-| ✓ | 1.0 | 1 | 100.0 | `TtyDisplay::new` | `./src/output/display.rs:437` |
-| ✓ | 1.0 | 1 | 100.0 | `TtyDisplay::set_editor_spawn` | `./src/output/display.rs:485` |
-| ✓ | 1.0 | 1 | 100.0 | `TtyDisplay::term_width` | `./src/output/display.rs:489` |
+| ✓ | 1.0 | 1 | 100.0 | `TtyDisplay::new` | `./src/output/display.rs:441` |
+| ✓ | 1.0 | 1 | 100.0 | `TtyDisplay::set_editor_spawn` | `./src/output/display.rs:490` |
+| ✓ | 1.0 | 1 | 100.0 | `TtyDisplay::term_width` | `./src/output/display.rs:494` |
+| ✓ | 1.0 | 1 | 100.0 | `TtyDisplay::term_height` | `./src/output/display.rs:511` |
 | ✓ | 1.0 | 1 | 100.0 | `Theme::new` | `./src/output/style.rs:37` |
 | ✓ | 1.0 | 1 | 100.0 | `Theme::color_enabled` | `./src/output/style.rs:41` |
 | ✓ | 1.0 | 1 | 100.0 | `Theme::pass_glyph` | `./src/output/style.rs:57` |
@@ -168,4 +169,4 @@ The cleanup plan for the remaining flagged functions lives in
 | ✓ | 1.0 | 1 | 100.0 | `bytes_to_pathbuf` | `./src/git.rs:94` |
 | ✓ | 1.0 | 1 | 100.0 | `rebase_for_app` | `./src/git.rs:101` |
 
-✗ 4/147 function(s) exceed CRAP threshold 30.
+✗ 3/148 function(s) exceed CRAP threshold 30.

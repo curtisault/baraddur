@@ -346,6 +346,10 @@ pub struct TtyDisplay {
     name_width: usize,
     /// How many lines the last `redraw()` or `browse_redraw()` printed.
     rendered_lines: u16,
+    /// Terminal `(width, height)` at the last successful paint. Used to
+    /// detect resizes (e.g., tmux pane drag) between renders so the next
+    /// redraw can fall back to a full clear instead of a stale `MoveUp`.
+    last_term_size: (u16, u16),
     spinner_frame: usize,
     has_running: bool,
     /// Original termios saved on construction so we can restore on drop.
@@ -451,6 +455,7 @@ impl TtyDisplay {
             statuses: Vec::new(),
             name_width: 0,
             rendered_lines: 0,
+            last_term_size: (0, 0),
             spinner_frame: 0,
             has_running: false,
             #[cfg(unix)]
@@ -505,6 +510,53 @@ impl TtyDisplay {
 
     fn term_height() -> u16 {
         crossterm::terminal::size().map(|(_, r)| r).unwrap_or(24)
+    }
+
+    /// Erases the previous render in preparation for a fresh paint.
+    ///
+    /// Uses `MoveUp + Clear(FromCursorDown)` (the fast path) when the terminal
+    /// is the same size as last paint and the previous render still fits in
+    /// the viewport. Falls back to `Clear(All) + MoveTo(0,0)` when the
+    /// terminal was resized (tmux pane drag, window resize) or when
+    /// `rendered_lines` would point into scrollback — both cases would land
+    /// `MoveUp` in the wrong row, leaving stale content behind (duplicate
+    /// dividers) or cropping the top of the new render. Resets
+    /// `rendered_lines` to 0 when it forces a full clear so the caller's
+    /// paint loop can start counting from a known origin.
+    fn prepare_redraw_region(&mut self) {
+        let mut stdout = std::io::stdout();
+        let current = (Self::term_width() as u16, Self::term_height());
+        let (_, h) = current;
+
+        // First paint of a run: leave whatever's already on screen
+        // (banner, prior log lines, the `--no-clear` history) alone and
+        // just append below it. Matches the original incremental model.
+        if self.rendered_lines == 0 {
+            self.last_term_size = current;
+            return;
+        }
+
+        let size_changed = self.last_term_size != current;
+        let cannot_move_up_safely = self.rendered_lines + 1 > h;
+
+        if size_changed || cannot_move_up_safely {
+            execute!(
+                stdout,
+                terminal::Clear(ClearType::All),
+                cursor::MoveTo(0, 0)
+            )
+            .ok();
+            self.rendered_lines = 0;
+        } else {
+            execute!(
+                stdout,
+                cursor::MoveUp(self.rendered_lines),
+                terminal::Clear(ClearType::FromCursorDown)
+            )
+            .ok();
+        }
+
+        self.last_term_size = current;
     }
 
     fn raw_mode_on(&mut self) {
@@ -658,14 +710,7 @@ impl TtyDisplay {
         let mut stdout = std::io::stdout();
         let width = Self::term_width();
 
-        if self.rendered_lines > 0 {
-            execute!(
-                stdout,
-                cursor::MoveUp(self.rendered_lines),
-                terminal::Clear(ClearType::FromCursorDown)
-            )
-            .ok();
-        }
+        self.prepare_redraw_region();
 
         let mut lines = 0u16;
 
@@ -988,17 +1033,7 @@ impl TtyDisplay {
         self.browse_scroll = self.browse_scroll.min(total_rows.saturating_sub(viewport));
 
         // ── Erase previous render, then print the viewport ───────────────
-        if self.rendered_lines > 0 {
-            let move_up = self
-                .rendered_lines
-                .min((term_height as u16).saturating_sub(1));
-            execute!(
-                stdout,
-                cursor::MoveUp(move_up),
-                terminal::Clear(ClearType::FromCursorDown)
-            )
-            .ok();
-        }
+        self.prepare_redraw_region();
 
         let mut skip = self.browse_scroll;
         let mut rendered = 0usize;
