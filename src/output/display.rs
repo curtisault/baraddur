@@ -158,6 +158,46 @@ fn format_trigger_suffix(paths: Option<&[PathBuf]>) -> String {
     }
 }
 
+/// Outcome of `redraw_strategy`: tells the caller how to erase the previous
+/// render before painting fresh content.
+#[derive(Debug, PartialEq, Eq)]
+enum RedrawStrategy {
+    /// Nothing on screen to erase — first paint of a run. The caller leaves
+    /// any pre-existing content (banner, log history) alone and appends.
+    Skip,
+    /// Resize-since-last-paint or rendered region exceeds the viewport. The
+    /// caller wipes the whole screen and repaints from `(0, 0)`.
+    FullClear,
+    /// Steady-state incremental clear: move the cursor up `n` rows and clear
+    /// from there to the bottom of the screen.
+    MoveUp(u16),
+}
+
+/// Picks the safe clear strategy for the next paint given the previous
+/// render's row count, the terminal size when that render happened, and the
+/// current terminal size.
+///
+/// Falls back to `FullClear` whenever the incremental `MoveUp` would land in
+/// the wrong row — i.e., the terminal was resized between paints (tmux pane
+/// drag, window resize) or the previous render no longer fits in the visible
+/// viewport (content has scrolled into scrollback). Both cases would leave
+/// stale content behind (duplicate dividers) or crop the top of the new
+/// render without this guard.
+fn redraw_strategy(
+    rendered_lines: u16,
+    last_size: (u16, u16),
+    current_size: (u16, u16),
+) -> RedrawStrategy {
+    if rendered_lines == 0 {
+        return RedrawStrategy::Skip;
+    }
+    let (_, h) = current_size;
+    if last_size != current_size || rendered_lines + 1 > h {
+        return RedrawStrategy::FullClear;
+    }
+    RedrawStrategy::MoveUp(rendered_lines)
+}
+
 // ── Non-TTY display (append-only) ───────────────────────────────────────────
 
 /// Append-only line output for non-TTY contexts (piped, CI, `--no-tty`).
@@ -514,46 +554,33 @@ impl TtyDisplay {
 
     /// Erases the previous render in preparation for a fresh paint.
     ///
-    /// Uses `MoveUp + Clear(FromCursorDown)` (the fast path) when the terminal
-    /// is the same size as last paint and the previous render still fits in
-    /// the viewport. Falls back to `Clear(All) + MoveTo(0,0)` when the
-    /// terminal was resized (tmux pane drag, window resize) or when
-    /// `rendered_lines` would point into scrollback — both cases would land
-    /// `MoveUp` in the wrong row, leaving stale content behind (duplicate
-    /// dividers) or cropping the top of the new render. Resets
-    /// `rendered_lines` to 0 when it forces a full clear so the caller's
-    /// paint loop can start counting from a known origin.
+    /// Delegates the choice between fast incremental clear and full-screen
+    /// clear to `redraw_strategy` (which is pure and unit-tested), then
+    /// applies the chosen strategy via crossterm and updates the tracked
+    /// terminal size.
     fn prepare_redraw_region(&mut self) {
         let mut stdout = std::io::stdout();
         let current = (Self::term_width() as u16, Self::term_height());
-        let (_, h) = current;
 
-        // First paint of a run: leave whatever's already on screen
-        // (banner, prior log lines, the `--no-clear` history) alone and
-        // just append below it. Matches the original incremental model.
-        if self.rendered_lines == 0 {
-            self.last_term_size = current;
-            return;
-        }
-
-        let size_changed = self.last_term_size != current;
-        let cannot_move_up_safely = self.rendered_lines + 1 > h;
-
-        if size_changed || cannot_move_up_safely {
-            execute!(
-                stdout,
-                terminal::Clear(ClearType::All),
-                cursor::MoveTo(0, 0)
-            )
-            .ok();
-            self.rendered_lines = 0;
-        } else {
-            execute!(
-                stdout,
-                cursor::MoveUp(self.rendered_lines),
-                terminal::Clear(ClearType::FromCursorDown)
-            )
-            .ok();
+        match redraw_strategy(self.rendered_lines, self.last_term_size, current) {
+            RedrawStrategy::Skip => {}
+            RedrawStrategy::FullClear => {
+                execute!(
+                    stdout,
+                    terminal::Clear(ClearType::All),
+                    cursor::MoveTo(0, 0)
+                )
+                .ok();
+                self.rendered_lines = 0;
+            }
+            RedrawStrategy::MoveUp(n) => {
+                execute!(
+                    stdout,
+                    cursor::MoveUp(n),
+                    terminal::Clear(ClearType::FromCursorDown)
+                )
+                .ok();
+            }
         }
 
         self.last_term_size = current;
@@ -2471,6 +2498,75 @@ mod tests {
         // message needs a redraw to disappear.
         assert!(matches!(dispatch(&mut d, 'x'), BrowseAction::Redraw));
         assert!(d.transient_message.is_none());
+    }
+
+    #[test]
+    fn redraw_strategy_skips_when_nothing_was_rendered() {
+        // First paint of a run: leave whatever's on screen alone.
+        assert_eq!(redraw_strategy(0, (80, 24), (80, 24)), RedrawStrategy::Skip,);
+        // Skip wins even if the size also changed — there's still nothing
+        // to erase.
+        assert_eq!(
+            redraw_strategy(0, (80, 24), (100, 30)),
+            RedrawStrategy::Skip,
+        );
+    }
+
+    #[test]
+    fn redraw_strategy_uses_move_up_when_size_unchanged_and_fits() {
+        assert_eq!(
+            redraw_strategy(5, (80, 24), (80, 24)),
+            RedrawStrategy::MoveUp(5),
+        );
+    }
+
+    #[test]
+    fn redraw_strategy_falls_back_to_full_clear_on_width_change() {
+        assert_eq!(
+            redraw_strategy(5, (80, 24), (100, 24)),
+            RedrawStrategy::FullClear,
+        );
+    }
+
+    #[test]
+    fn redraw_strategy_falls_back_to_full_clear_on_height_change() {
+        assert_eq!(
+            redraw_strategy(5, (80, 24), (80, 30)),
+            RedrawStrategy::FullClear,
+        );
+    }
+
+    #[test]
+    fn redraw_strategy_treats_first_call_as_size_change() {
+        // last_size starts as (0, 0); any real terminal differs.
+        assert_eq!(
+            redraw_strategy(5, (0, 0), (80, 24)),
+            RedrawStrategy::FullClear,
+        );
+    }
+
+    #[test]
+    fn redraw_strategy_falls_back_to_full_clear_when_rendered_exceeds_viewport() {
+        // rendered_lines + 1 > term_height means MoveUp would have to enter
+        // scrollback — fall back to full clear instead.
+        assert_eq!(
+            redraw_strategy(24, (80, 24), (80, 24)),
+            RedrawStrategy::FullClear,
+        );
+        assert_eq!(
+            redraw_strategy(100, (80, 24), (80, 24)),
+            RedrawStrategy::FullClear,
+        );
+    }
+
+    #[test]
+    fn redraw_strategy_move_up_at_height_boundary() {
+        // rendered_lines + 1 == term_height: previous render exactly fits
+        // with one row of headroom; MoveUp is still safe.
+        assert_eq!(
+            redraw_strategy(23, (80, 24), (80, 24)),
+            RedrawStrategy::MoveUp(23),
+        );
     }
 
     /// restore_signals_and_output must turn OPOST and ISIG back on, even if
