@@ -158,6 +158,46 @@ fn format_trigger_suffix(paths: Option<&[PathBuf]>) -> String {
     }
 }
 
+/// Outcome of `redraw_strategy`: tells the caller how to erase the previous
+/// render before painting fresh content.
+#[derive(Debug, PartialEq, Eq)]
+enum RedrawStrategy {
+    /// Nothing on screen to erase — first paint of a run. The caller leaves
+    /// any pre-existing content (banner, log history) alone and appends.
+    Skip,
+    /// Resize-since-last-paint or rendered region exceeds the viewport. The
+    /// caller wipes the whole screen and repaints from `(0, 0)`.
+    FullClear,
+    /// Steady-state incremental clear: move the cursor up `n` rows and clear
+    /// from there to the bottom of the screen.
+    MoveUp(u16),
+}
+
+/// Picks the safe clear strategy for the next paint given the previous
+/// render's row count, the terminal size when that render happened, and the
+/// current terminal size.
+///
+/// Falls back to `FullClear` whenever the incremental `MoveUp` would land in
+/// the wrong row — i.e., the terminal was resized between paints (tmux pane
+/// drag, window resize) or the previous render no longer fits in the visible
+/// viewport (content has scrolled into scrollback). Both cases would leave
+/// stale content behind (duplicate dividers) or crop the top of the new
+/// render without this guard.
+fn redraw_strategy(
+    rendered_lines: u16,
+    last_size: (u16, u16),
+    current_size: (u16, u16),
+) -> RedrawStrategy {
+    if rendered_lines == 0 {
+        return RedrawStrategy::Skip;
+    }
+    let (_, h) = current_size;
+    if last_size != current_size || rendered_lines + 1 > h {
+        return RedrawStrategy::FullClear;
+    }
+    RedrawStrategy::MoveUp(rendered_lines)
+}
+
 // ── Non-TTY display (append-only) ───────────────────────────────────────────
 
 /// Append-only line output for non-TTY contexts (piped, CI, `--no-tty`).
@@ -346,6 +386,10 @@ pub struct TtyDisplay {
     name_width: usize,
     /// How many lines the last `redraw()` or `browse_redraw()` printed.
     rendered_lines: u16,
+    /// Terminal `(width, height)` at the last successful paint. Used to
+    /// detect resizes (e.g., tmux pane drag) between renders so the next
+    /// redraw can fall back to a full clear instead of a stale `MoveUp`.
+    last_term_size: (u16, u16),
     spinner_frame: usize,
     has_running: bool,
     /// Original termios saved on construction so we can restore on drop.
@@ -451,6 +495,7 @@ impl TtyDisplay {
             statuses: Vec::new(),
             name_width: 0,
             rendered_lines: 0,
+            last_term_size: (0, 0),
             spinner_frame: 0,
             has_running: false,
             #[cfg(unix)]
@@ -505,6 +550,40 @@ impl TtyDisplay {
 
     fn term_height() -> u16 {
         crossterm::terminal::size().map(|(_, r)| r).unwrap_or(24)
+    }
+
+    /// Erases the previous render in preparation for a fresh paint.
+    ///
+    /// Delegates the choice between fast incremental clear and full-screen
+    /// clear to `redraw_strategy` (which is pure and unit-tested), then
+    /// applies the chosen strategy via crossterm and updates the tracked
+    /// terminal size.
+    fn prepare_redraw_region(&mut self) {
+        let mut stdout = std::io::stdout();
+        let current = (Self::term_width() as u16, Self::term_height());
+
+        match redraw_strategy(self.rendered_lines, self.last_term_size, current) {
+            RedrawStrategy::Skip => {}
+            RedrawStrategy::FullClear => {
+                execute!(
+                    stdout,
+                    terminal::Clear(ClearType::All),
+                    cursor::MoveTo(0, 0)
+                )
+                .ok();
+                self.rendered_lines = 0;
+            }
+            RedrawStrategy::MoveUp(n) => {
+                execute!(
+                    stdout,
+                    cursor::MoveUp(n),
+                    terminal::Clear(ClearType::FromCursorDown)
+                )
+                .ok();
+            }
+        }
+
+        self.last_term_size = current;
     }
 
     fn raw_mode_on(&mut self) {
@@ -658,14 +737,7 @@ impl TtyDisplay {
         let mut stdout = std::io::stdout();
         let width = Self::term_width();
 
-        if self.rendered_lines > 0 {
-            execute!(
-                stdout,
-                cursor::MoveUp(self.rendered_lines),
-                terminal::Clear(ClearType::FromCursorDown)
-            )
-            .ok();
-        }
+        self.prepare_redraw_region();
 
         let mut lines = 0u16;
 
@@ -737,19 +809,198 @@ impl TtyDisplay {
         let _ = stdout.flush();
     }
 
-    /// Redraws the step list for browse mode: includes cursor highlight and
-    /// inline expanded output for toggled steps. Clipped to terminal height
-    /// via a scroll viewport that always keeps the cursor step visible.
-    fn browse_redraw(&mut self) {
-        let mut stdout = std::io::stdout();
-        let width = Self::term_width();
-        let term_height = Self::term_height() as usize;
+    /// Builds the single status row for step index `i`: glyph + name + optional
+    /// inline diagnostic + optional right-justified duration, with cursor
+    /// highlight when in browse mode. Returns `(rendered_line, terminal_rows)`.
+    fn step_row(&self, i: usize, width: usize) -> (String, usize) {
+        let (glyph, diagnostic, duration_str) = match &self.statuses[i] {
+            StepStatus::Queued => (
+                format!("{}", self.theme.queued_glyph()),
+                String::new(),
+                String::new(),
+            ),
+            StepStatus::Running => {
+                let frame = SPINNER_FRAMES[self.spinner_frame];
+                (
+                    format!("{}", self.theme.yellow(frame)),
+                    String::new(),
+                    String::new(),
+                )
+            }
+            StepStatus::Passed(d) => (
+                format!("{}", self.theme.pass_glyph()),
+                String::new(),
+                format!("{:.1}s", d.as_secs_f64()),
+            ),
+            StepStatus::Failed(d, diag) => {
+                let d_str = format!("{:.1}s", d.as_secs_f64());
+                let diag_str = if diag.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}", self.theme.dim(diag))
+                };
+                (format!("{}", self.theme.fail_glyph()), diag_str, d_str)
+            }
+            StepStatus::Skipped => (
+                format!("{}", self.theme.skip_glyph()),
+                format!("{}", self.theme.dim("skipped")),
+                String::new(),
+            ),
+        };
 
-        // ── Build full content into (text, terminal_rows) pairs ──────────
-        // We build everything first, then apply viewport clipping, so the
-        // scroll logic can see total height before deciding what to render.
+        let arrow = if i == self.cursor && !self.theme.color_enabled() {
+            "▶"
+        } else {
+            "▸"
+        };
+        let raw_prefix = format!("{arrow} {:nw$}", self.step_names[i], nw = self.name_width);
+        let styled_prefix = if i == self.cursor && self.browse_active {
+            format!("{}", self.theme.selected(&raw_prefix))
+        } else {
+            raw_prefix
+        };
+
+        let left = if diagnostic.is_empty() {
+            format!("{styled_prefix}  {glyph}")
+        } else {
+            format!("{styled_prefix}  {glyph}   {diagnostic}")
+        };
+
+        if duration_str.is_empty() {
+            let r = Self::visual_rows_for(&left, width) as usize;
+            (left, r)
+        } else {
+            let right = format!("{}", self.theme.dim(&duration_str));
+            let left_vis = visible_len(&left);
+            let right_vis = visible_len(&right);
+            let pad = width.saturating_sub(left_vis + right_vis);
+            let line = format!("{left}{:pad$}{right}", "");
+            let r = Self::visual_rows_for(&line, width) as usize;
+            (line, r)
+        }
+    }
+
+    /// Builds the expanded inline-output lines for step `i`. Lines that parse
+    /// as a diagnostic are highlighted; the "current" diagnostic on the cursor
+    /// step gets the strongest highlight (cyan underline, or `▶` in NO_COLOR).
+    /// Returns an empty Vec when the step is not expanded or has no captured
+    /// output.
+    fn expanded_output_lines(&self, i: usize, width: usize) -> Vec<(String, usize)> {
+        if !self.expanded.get(i).copied().unwrap_or(false) {
+            return Vec::new();
+        }
+        let Some(output) = self.step_outputs.get(i).filter(|o| !o.is_empty()) else {
+            return Vec::new();
+        };
+
+        let diags: &[crate::output::diagnostic::Diagnostic] = self
+            .parsed_diagnostics
+            .get(i)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let current = self.current_diagnostic.get(i).copied().unwrap_or(0);
+        let is_cursor_step = i == self.cursor;
+
+        let mut out = Vec::new();
+        for line in output.lines() {
+            // Output lines have a two-space prefix from
+            // `format_truncated_output`. Strip before pattern matching.
+            let raw = line.strip_prefix("  ").unwrap_or(line);
+            let diag_idx = crate::output::diagnostic::extract_line(raw)
+                .and_then(|d| diags.iter().position(|x| x == &d));
+            let (display_line, r) = if let Some(idx) = diag_idx {
+                let is_current = is_cursor_step && idx == current;
+                let styled = if is_current {
+                    // Color: cyan marker + cyan underlined body.
+                    // NO_COLOR: distinct `▶` glyph stands in for the
+                    // underline, matching the cursor-row fallback at
+                    // the step-list level.
+                    if self.theme.color_enabled() {
+                        format!(
+                            "{} {}",
+                            self.theme.cyan("▸"),
+                            self.theme.cyan_underline(raw)
+                        )
+                    } else {
+                        format!("▶ {raw}")
+                    }
+                } else {
+                    format!("{} {raw}", self.theme.dim("▸"))
+                };
+                let r = Self::visual_rows_for(&styled, width) as usize;
+                (styled, r)
+            } else {
+                let r = Self::visual_rows_for(line, width) as usize;
+                (line.to_string(), r)
+            };
+            out.push((display_line, r));
+        }
+        out
+    }
+
+    /// Builds the persistent browse-mode footer: post-run summary, optional
+    /// `[on_failure]` hook block, help bar (or help modal when active), and
+    /// the transient one-shot status message. Returns an empty Vec when
+    /// browse mode is not active so the caller can append unconditionally.
+    fn footer_lines(&self, width: usize) -> Vec<(String, usize)> {
+        if !self.browse_active {
+            return Vec::new();
+        }
+
+        let mut out: Vec<(String, usize)> = Vec::new();
+        out.push((String::new(), 1)); // spacer before the footer
+
+        if !self.run_summary.is_empty() {
+            let r = Self::visual_rows_for(&self.run_summary, width) as usize;
+            out.push((self.run_summary.clone(), r));
+            out.push((String::new(), 1));
+        }
+
+        // Hook slot: "running…" while in flight; output once settled. Only
+        // one of the two is shown at a time.
+        if self.hook_running {
+            let line = format!("  {}", self.theme.dim("running on_failure hook…"));
+            let r = Self::visual_rows_for(&line, width) as usize;
+            out.push((line, r));
+            out.push((String::new(), 1));
+        } else if !self.hook_output_text.is_empty() {
+            for line in self.hook_output_text.lines() {
+                let styled = format!("  {}", self.theme.dim(line));
+                let r = Self::visual_rows_for(&styled, width) as usize;
+                out.push((styled, r));
+            }
+            out.push((String::new(), 1));
+        }
+
+        if self.help_modal_active {
+            for line in self.help_modal_lines() {
+                let r = Self::visual_rows_for(&line, width) as usize;
+                out.push((line, r));
+            }
+        } else {
+            // Grouped, symbol-led, fits ~80 cols.
+            let help = "  ↕ j/k   ⏎ toggle   ▸ n/p/e   ↺ r/f/c   ? help · q quit";
+            let help_styled = format!("{}", self.theme.dim(help));
+            let r = Self::visual_rows_for(&help_styled, width) as usize;
+            out.push((help_styled, r));
+        }
+
+        if let Some(msg) = &self.transient_message {
+            let line = format!("  {}", self.theme.yellow(msg));
+            let r = Self::visual_rows_for(&line, width) as usize;
+            out.push((line, r));
+        }
+
+        out
+    }
+
+    /// Assembles the full content of the browse-mode view as `(text, rows)`
+    /// pairs, alongside the cursor step's vertical anchor (top row and row
+    /// height in the buffer). Pure over `&self` so scroll math and paint
+    /// can be tested or invoked independently.
+    fn compute_lines(&self, width: usize) -> (Vec<(String, usize)>, usize, usize) {
         let mut all_lines: Vec<(String, usize)> = Vec::new();
-        let mut cursor_top_row = 0usize; // terminal row where the cursor step starts
+        let mut cursor_top_row = 0usize;
         let mut cursor_row_height = 1usize;
         let mut cumulative = 0usize;
 
@@ -758,72 +1009,8 @@ impl TtyDisplay {
             cumulative += 1;
         }
 
-        for (i, name) in self.step_names.iter().enumerate() {
-            let (glyph, diagnostic, duration_str) = match &self.statuses[i] {
-                StepStatus::Queued => (
-                    format!("{}", self.theme.queued_glyph()),
-                    String::new(),
-                    String::new(),
-                ),
-                StepStatus::Running => {
-                    let frame = SPINNER_FRAMES[self.spinner_frame];
-                    (
-                        format!("{}", self.theme.yellow(frame)),
-                        String::new(),
-                        String::new(),
-                    )
-                }
-                StepStatus::Passed(d) => (
-                    format!("{}", self.theme.pass_glyph()),
-                    String::new(),
-                    format!("{:.1}s", d.as_secs_f64()),
-                ),
-                StepStatus::Failed(d, diag) => {
-                    let d_str = format!("{:.1}s", d.as_secs_f64());
-                    let diag_str = if diag.is_empty() {
-                        String::new()
-                    } else {
-                        format!("{}", self.theme.dim(diag))
-                    };
-                    (format!("{}", self.theme.fail_glyph()), diag_str, d_str)
-                }
-                StepStatus::Skipped => (
-                    format!("{}", self.theme.skip_glyph()),
-                    format!("{}", self.theme.dim("skipped")),
-                    String::new(),
-                ),
-            };
-
-            let arrow = if i == self.cursor && !self.theme.color_enabled() {
-                "▶"
-            } else {
-                "▸"
-            };
-            let raw_prefix = format!("{arrow} {:nw$}", name, nw = self.name_width);
-            let styled_prefix = if i == self.cursor && self.browse_active {
-                format!("{}", self.theme.selected(&raw_prefix))
-            } else {
-                raw_prefix
-            };
-
-            let left = if diagnostic.is_empty() {
-                format!("{styled_prefix}  {glyph}")
-            } else {
-                format!("{styled_prefix}  {glyph}   {diagnostic}")
-            };
-
-            let (step_text, step_rows) = if duration_str.is_empty() {
-                let r = Self::visual_rows_for(&left, width) as usize;
-                (left, r)
-            } else {
-                let right = format!("{}", self.theme.dim(&duration_str));
-                let left_vis = visible_len(&left);
-                let right_vis = visible_len(&right);
-                let pad = width.saturating_sub(left_vis + right_vis);
-                let line = format!("{left}{:pad$}{right}", "");
-                let r = Self::visual_rows_for(&line, width) as usize;
-                (line, r)
-            };
+        for i in 0..self.step_names.len() {
+            let (step_text, step_rows) = self.step_row(i, width);
 
             if i == self.cursor {
                 cursor_top_row = cumulative;
@@ -832,110 +1019,38 @@ impl TtyDisplay {
             cumulative += step_rows;
             all_lines.push((step_text, step_rows));
 
-            if self.expanded.get(i).copied().unwrap_or(false)
-                && let Some(output) = self.step_outputs.get(i).filter(|o| !o.is_empty())
-            {
-                let diags: &[crate::output::diagnostic::Diagnostic] = self
-                    .parsed_diagnostics
-                    .get(i)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
-                let current = self.current_diagnostic.get(i).copied().unwrap_or(0);
-                let is_cursor_step = i == self.cursor;
-                for line in output.lines() {
-                    // Output lines have a two-space prefix from
-                    // `format_truncated_output`. Strip before pattern matching.
-                    let raw = line.strip_prefix("  ").unwrap_or(line);
-                    let diag_idx = crate::output::diagnostic::extract_line(raw)
-                        .and_then(|d| diags.iter().position(|x| x == &d));
-                    let (display_line, r) = if let Some(idx) = diag_idx {
-                        let is_current = is_cursor_step && idx == current;
-                        let styled = if is_current {
-                            // Color: cyan marker + cyan underlined body.
-                            // NO_COLOR: distinct `▶` glyph stands in for the
-                            // underline, matching the cursor-row fallback at
-                            // the step-list level.
-                            if self.theme.color_enabled() {
-                                format!(
-                                    "{} {}",
-                                    self.theme.cyan("▸"),
-                                    self.theme.cyan_underline(raw)
-                                )
-                            } else {
-                                format!("▶ {raw}")
-                            }
-                        } else {
-                            format!("{} {raw}", self.theme.dim("▸"))
-                        };
-                        let r = Self::visual_rows_for(&styled, width) as usize;
-                        (styled, r)
-                    } else {
-                        let r = Self::visual_rows_for(line, width) as usize;
-                        (line.to_string(), r)
-                    };
-                    cumulative += r;
-                    all_lines.push((display_line, r));
-                }
+            for (line, r) in self.expanded_output_lines(i, width) {
+                cumulative += r;
+                all_lines.push((line, r));
             }
         }
 
-        if self.browse_active {
-            // Spacer before the footer.
-            all_lines.push((String::new(), 1));
-            cumulative += 1;
-            if !self.run_summary.is_empty() {
-                let r = Self::visual_rows_for(&self.run_summary, width) as usize;
-                all_lines.push((self.run_summary.clone(), r));
-                cumulative += r;
-                all_lines.push((String::new(), 1));
-                cumulative += 1;
-            }
-            // Hook slot: "running…" while in flight; output once settled.
-            // Only one of the two is shown at a time.
-            if self.hook_running {
-                let line = format!("  {}", self.theme.dim("running on_failure hook…"));
-                let r = Self::visual_rows_for(&line, width) as usize;
-                all_lines.push((line, r));
-                cumulative += r;
-                all_lines.push((String::new(), 1));
-                cumulative += 1;
-            } else if !self.hook_output_text.is_empty() {
-                for line in self.hook_output_text.lines() {
-                    let styled = format!("  {}", self.theme.dim(line));
-                    let r = Self::visual_rows_for(&styled, width) as usize;
-                    all_lines.push((styled, r));
-                    cumulative += r;
-                }
-                all_lines.push((String::new(), 1));
-                cumulative += 1;
-            }
-            if self.help_modal_active {
-                for line in self.help_modal_lines() {
-                    let r = Self::visual_rows_for(&line, width) as usize;
-                    all_lines.push((line, r));
-                    cumulative += r;
-                }
-            } else {
-                // Option B: grouped, symbol-led, fits ~80 cols.
-                let help = "  ↕ j/k   ⏎ toggle   ▸ n/p/e   ↺ r/f/c   ? help · q quit";
-                let help_styled = format!("{}", self.theme.dim(help));
-                let r = Self::visual_rows_for(&help_styled, width) as usize;
-                all_lines.push((help_styled, r));
-                cumulative += r;
-            }
-
-            if let Some(msg) = &self.transient_message {
-                let line = format!("  {}", self.theme.yellow(msg));
-                let r = Self::visual_rows_for(&line, width) as usize;
-                all_lines.push((line, r));
-                cumulative += r;
-            }
+        // Footer rows aren't tracked here — `cumulative` was only needed to
+        // anchor the cursor, which is always above the footer.
+        for (line, r) in self.footer_lines(width) {
+            all_lines.push((line, r));
         }
+        let _ = cumulative;
 
-        // ── Adjust scroll so cursor step stays in viewport ───────────────
-        // Reserve 1 extra row so the last line never hugs the very bottom.
+        (all_lines, cursor_top_row, cursor_row_height)
+    }
+
+    /// Redraws the step list for browse mode: includes cursor highlight and
+    /// inline expanded output for toggled steps. Clipped to terminal height
+    /// via a scroll viewport that always keeps the cursor step visible.
+    /// Layout is built by `compute_lines`; this function owns scroll math
+    /// and the terminal paint.
+    fn browse_redraw(&mut self) {
+        let mut stdout = std::io::stdout();
+        let width = Self::term_width();
+        let term_height = Self::term_height() as usize;
+
+        let (all_lines, cursor_top_row, cursor_row_height) = self.compute_lines(width);
+        let total_rows: usize = all_lines.iter().map(|(_, r)| r).sum();
+
+        // Adjust scroll so the cursor step stays in viewport. Reserve 1 row
+        // so the last line never hugs the very bottom.
         let viewport = term_height.saturating_sub(1);
-        let total_rows = cumulative;
 
         if cursor_top_row < self.browse_scroll {
             self.browse_scroll = cursor_top_row;
@@ -945,17 +1060,7 @@ impl TtyDisplay {
         self.browse_scroll = self.browse_scroll.min(total_rows.saturating_sub(viewport));
 
         // ── Erase previous render, then print the viewport ───────────────
-        if self.rendered_lines > 0 {
-            let move_up = self
-                .rendered_lines
-                .min((term_height as u16).saturating_sub(1));
-            execute!(
-                stdout,
-                cursor::MoveUp(move_up),
-                terminal::Clear(ClearType::FromCursorDown)
-            )
-            .ok();
-        }
+        self.prepare_redraw_region();
 
         let mut skip = self.browse_scroll;
         let mut rendered = 0usize;
@@ -1012,6 +1117,63 @@ impl TtyDisplay {
         } else {
             format!("{}", self.theme.dim(&self.run_divider))
         }
+    }
+
+    /// Captures stdout/stderr from each result into the browse buffer and
+    /// initialises browse-mode state: failed steps are pre-expanded,
+    /// diagnostics parsed off the full (untruncated) output, cursor moved
+    /// to the first failing step. Mutates `&mut self`; no terminal I/O.
+    fn capture_step_outputs(&mut self, results: &[StepResult]) {
+        for r in results {
+            if let Some(idx) = self.step_names.iter().position(|n| n == &r.name) {
+                self.step_outputs[idx] = format_truncated_output(&r.stdout, &r.stderr);
+                self.expanded[idx] = !r.success;
+                let combined = if r.stderr.is_empty() {
+                    r.stdout.clone()
+                } else if r.stdout.is_empty() {
+                    r.stderr.clone()
+                } else {
+                    format!("{}\n{}", r.stdout, r.stderr)
+                };
+                self.parsed_diagnostics[idx] = crate::output::diagnostic::parse(&combined);
+                self.current_diagnostic[idx] = 0;
+            }
+        }
+        self.cursor = results
+            .iter()
+            .find(|r| !r.success)
+            .and_then(|r| self.step_names.iter().position(|n| n == &r.name))
+            .unwrap_or(0);
+        self.all_expanded = results.iter().any(|r| !r.success);
+    }
+
+    /// Builds the colored summary line shown after a run — failed/passed/
+    /// skipped counts and the elapsed wall-clock, joined by `·`. Pure over
+    /// `&self`; output is a single styled string ready for `println!`.
+    fn summary_line(&self, results: &[StepResult], elapsed: f64) -> String {
+        let failed = results.iter().filter(|r| !r.success).count();
+        let passed = results.iter().filter(|r| r.success).count();
+        let skipped = self.step_names.len().saturating_sub(results.len());
+
+        let mut parts: Vec<String> = Vec::new();
+        if failed > 0 {
+            let s = format!("{failed} failed");
+            parts.push(format!("{}", self.theme.red(&s)));
+        }
+        let s = format!("{passed} passed");
+        parts.push(format!("{}", self.theme.green(&s)));
+        if skipped > 0 {
+            let s = format!("{skipped} skipped");
+            parts.push(format!("{}", self.theme.dim(&s)));
+        }
+        let time_str = if failed == 0 {
+            format!("all passing · {elapsed:.1}s")
+        } else {
+            format!("{elapsed:.1}s")
+        };
+        parts.push(format!("{}", self.theme.dim(&time_str)));
+
+        parts.join(" · ")
     }
 }
 
@@ -1169,40 +1331,13 @@ impl Display for TtyDisplay {
         // and replace them cleanly in one pass.
         self.has_running = false;
 
-        // Capture outputs and set initial browse state.
-        for r in results {
-            if let Some(idx) = self.step_names.iter().position(|n| n == &r.name) {
-                self.step_outputs[idx] = format_truncated_output(&r.stdout, &r.stderr);
-                self.expanded[idx] = !r.success;
-                // Parse diagnostics from the full (untruncated) output so
-                // entries hidden by elision are still navigable via n/p.
-                let combined = if r.stderr.is_empty() {
-                    r.stdout.clone()
-                } else if r.stdout.is_empty() {
-                    r.stderr.clone()
-                } else {
-                    format!("{}\n{}", r.stdout, r.stderr)
-                };
-                self.parsed_diagnostics[idx] = crate::output::diagnostic::parse(&combined);
-                self.current_diagnostic[idx] = 0;
-            }
-        }
-        self.cursor = results
-            .iter()
-            .find(|r| !r.success)
-            .and_then(|r| self.step_names.iter().position(|n| n == &r.name))
-            .unwrap_or(0);
-        self.all_expanded = results.iter().any(|r| !r.success);
+        self.capture_step_outputs(results);
 
         if self.verbosity == Verbosity::Quiet && results.iter().all(|r| r.success) {
             self.rendered_lines = 0;
             return;
         }
 
-        // Footer only — output is shown inline in browse mode, not duplicated here.
-        let failed = results.iter().filter(|r| !r.success).count();
-        let passed = results.iter().filter(|r| r.success).count();
-        let skipped = self.step_names.len().saturating_sub(results.len());
         let elapsed = self
             .run_start
             .take()
@@ -1212,25 +1347,7 @@ impl Display for TtyDisplay {
         println!();
         self.rendered_lines += 1;
 
-        let mut parts: Vec<String> = Vec::new();
-        if failed > 0 {
-            let s = format!("{failed} failed");
-            parts.push(format!("{}", self.theme.red(&s)));
-        }
-        let s = format!("{passed} passed");
-        parts.push(format!("{}", self.theme.green(&s)));
-        if skipped > 0 {
-            let s = format!("{skipped} skipped");
-            parts.push(format!("{}", self.theme.dim(&s)));
-        }
-        let time_str = if failed == 0 {
-            format!("all passing · {elapsed:.1}s")
-        } else {
-            format!("{elapsed:.1}s")
-        };
-        parts.push(format!("{}", self.theme.dim(&time_str)));
-
-        let summary = parts.join(" · ");
+        let summary = self.summary_line(results, elapsed);
         self.run_summary = summary.clone();
         println!("{summary}");
         let width = Self::term_width();
@@ -1630,6 +1747,825 @@ mod tests {
         assert_eq!(
             d.transient_message.as_deref(),
             Some("no diagnostics on this step")
+        );
+    }
+
+    fn mk_step_result(
+        success: bool,
+        exit_code: Option<i32>,
+        stdout: &str,
+        stderr: &str,
+    ) -> StepResult {
+        StepResult {
+            name: "s".into(),
+            success,
+            exit_code,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            duration: Duration::from_secs(0),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }
+    }
+
+    #[test]
+    fn short_diagnostic_empty_when_step_succeeded() {
+        let r = mk_step_result(true, Some(0), "anything\n", "");
+        assert_eq!(short_diagnostic(&r), "");
+    }
+
+    #[test]
+    fn short_diagnostic_reports_command_not_found_for_no_exit_code() {
+        let r = mk_step_result(false, None, "", "");
+        assert_eq!(short_diagnostic(&r), "command not found");
+    }
+
+    #[test]
+    fn short_diagnostic_empty_when_no_non_blank_output() {
+        let r = mk_step_result(false, Some(1), "  \n\n   \n", "");
+        assert_eq!(short_diagnostic(&r), "");
+    }
+
+    #[test]
+    fn short_diagnostic_returns_single_short_line_untouched() {
+        let r = mk_step_result(false, Some(1), "boom\n", "");
+        assert_eq!(short_diagnostic(&r), "boom");
+    }
+
+    #[test]
+    fn short_diagnostic_truncates_single_long_line_at_40_chars() {
+        let line = "x".repeat(50);
+        let r = mk_step_result(false, Some(1), &line, "");
+        let out = short_diagnostic(&r);
+        assert_eq!(out.chars().filter(|c| *c == 'x').count(), 40);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn short_diagnostic_summarizes_multiple_lines_as_count() {
+        let r = mk_step_result(false, Some(2), "error one\nerror two\nerror three\n", "");
+        assert_eq!(short_diagnostic(&r), "3 lines");
+    }
+
+    #[test]
+    fn short_diagnostic_merges_stdout_and_stderr_for_line_count() {
+        let r = mk_step_result(false, Some(1), "a\n", "b\nc\n");
+        // stdout "a\n" + stderr "b\nc\n" concatenated → 3 non-blank lines.
+        assert_eq!(short_diagnostic(&r), "3 lines");
+    }
+
+    #[test]
+    fn help_modal_lines_has_header_columns_and_dismiss_footer() {
+        use super::super::style::strip_ansi;
+
+        let d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        let lines = d.help_modal_lines();
+
+        // 1 header + 1 blank + 10 rows + 1 blank + 1 footer = 14 lines.
+        assert_eq!(lines.len(), 14, "unexpected line count: {lines:#?}");
+
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert_eq!(plain[0].trim(), "Help");
+        assert_eq!(plain[1], "");
+        assert!(
+            plain[2].contains("Navigation") && plain[2].contains("Diagnostics"),
+            "first row should carry both section headers, got {:?}",
+            plain[2]
+        );
+        assert!(
+            plain
+                .iter()
+                .any(|l| l.contains("Output") && l.contains("Rerun")),
+            "expected a row pairing Output / Rerun"
+        );
+        assert!(plain.last().unwrap().contains("press any key to dismiss"));
+    }
+
+    #[test]
+    fn help_modal_lines_pads_left_column_to_align_right_column() {
+        use super::super::style::{strip_ansi, visible_len};
+
+        let d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        let lines = d.help_modal_lines();
+
+        // Find the "j / ↓ down  …  n   next" row and confirm the right column
+        // starts at the same visible offset as on the section-header row.
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        let header_row = plain
+            .iter()
+            .find(|l| l.contains("Navigation") && l.contains("Diagnostics"))
+            .expect("header row");
+        let body_row = plain
+            .iter()
+            .find(|l| l.contains("down") && l.contains("next"))
+            .expect("body row");
+
+        // Right column starts at offset 2 (prefix) + 26 (col_width) = 28.
+        let header_right = visible_len(&header_row[..header_row.find("Diagnostics").unwrap()]);
+        // The body row's right column literally begins with `"  n   next"`,
+        // so the first occurrence of `"  n"` marks its start.
+        let body_right = visible_len(&body_row[..body_row.find("  n").unwrap()]);
+        assert_eq!(header_right, 28);
+        assert_eq!(body_right, 28);
+    }
+
+    #[test]
+    fn divider_styled_returns_empty_when_divider_is_empty() {
+        let d = TtyDisplay::new(Theme::new(true), Verbosity::Normal, true);
+        // Default state: run_divider is empty, statuses is empty.
+        assert_eq!(d.divider_styled(), "");
+    }
+
+    #[test]
+    fn divider_styled_is_dim_while_steps_still_running() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(true), Verbosity::Normal, true);
+        d.run_divider = "── run ──".into();
+        d.statuses = vec![
+            StepStatus::Passed(Duration::from_secs(0)),
+            StepStatus::Running,
+        ];
+
+        let out = d.divider_styled();
+        assert_eq!(strip_ansi(&out), "── run ──");
+        // Dim is rendered via ESC[2m in the theme; green/red use ESC[32m/[31m.
+        assert!(out.contains("\x1b[2m"), "expected dim ANSI, got {out:?}");
+        assert!(!out.contains("\x1b[32m") && !out.contains("\x1b[31m"));
+    }
+
+    #[test]
+    fn divider_styled_is_green_when_all_settled_and_passing() {
+        let mut d = TtyDisplay::new(Theme::new(true), Verbosity::Normal, true);
+        d.run_divider = "── run ──".into();
+        d.statuses = vec![
+            StepStatus::Passed(Duration::from_secs(0)),
+            StepStatus::Skipped,
+        ];
+
+        let out = d.divider_styled();
+        // crossterm renders `.green()` as the 256-color code 10.
+        assert!(
+            out.contains("[38;5;10m"),
+            "expected green ANSI, got {out:?}"
+        );
+        assert!(!out.contains("[38;5;9m") && !out.contains("[2m"));
+    }
+
+    #[test]
+    fn divider_styled_is_red_when_all_settled_and_any_failed() {
+        let mut d = TtyDisplay::new(Theme::new(true), Verbosity::Normal, true);
+        d.run_divider = "── run ──".into();
+        d.statuses = vec![
+            StepStatus::Passed(Duration::from_secs(0)),
+            StepStatus::Failed(Duration::from_secs(0), "boom".into()),
+        ];
+
+        let out = d.divider_styled();
+        // crossterm renders `.red()` as the 256-color code 9.
+        assert!(out.contains("[38;5;9m"), "expected red ANSI, got {out:?}");
+        assert!(!out.contains("[38;5;10m") && !out.contains("[2m"));
+    }
+
+    #[test]
+    fn step_row_queued_shows_glyph_only() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        // Default status after run_started is Queued.
+
+        let (line, rows) = d.step_row(0, 80);
+        let plain = strip_ansi(&line);
+        assert_eq!(rows, 1);
+        assert!(
+            plain.contains("check"),
+            "row should contain step name: {plain:?}"
+        );
+        // Queued state: no duration, no diagnostic.
+        assert!(
+            !plain.contains('s'),
+            "queued row should not show duration: {plain:?}"
+        );
+    }
+
+    #[test]
+    fn step_row_passed_appends_right_aligned_duration() {
+        use super::super::style::{strip_ansi, visible_len};
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.statuses[0] = StepStatus::Passed(Duration::from_millis(1500));
+
+        let (line, rows) = d.step_row(0, 80);
+        let plain = strip_ansi(&line);
+        assert_eq!(rows, 1);
+        assert!(plain.contains("check"));
+        assert!(
+            plain.ends_with("1.5s"),
+            "duration should be right-aligned: {plain:?}"
+        );
+        // Total width should match the requested width (padded between cols).
+        assert_eq!(visible_len(&line), 80);
+    }
+
+    #[test]
+    fn step_row_failed_with_diagnostic_includes_diag_text() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.statuses[0] = StepStatus::Failed(Duration::from_millis(2300), "boom".into());
+
+        let (line, _rows) = d.step_row(0, 80);
+        let plain = strip_ansi(&line);
+        assert!(plain.contains("check"));
+        assert!(plain.contains("boom"), "diagnostic text missing: {plain:?}");
+        assert!(plain.ends_with("2.3s"));
+    }
+
+    #[test]
+    fn step_row_cursor_uses_filled_arrow_in_no_color_mode() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string(), "b".to_string()]);
+        d.cursor = 1;
+
+        let (cursor_line, _) = d.step_row(1, 80);
+        let (other_line, _) = d.step_row(0, 80);
+        assert!(
+            strip_ansi(&cursor_line).contains("▶"),
+            "NO_COLOR cursor row should use filled `▶`: {cursor_line:?}"
+        );
+        assert!(
+            !strip_ansi(&other_line).contains("▶"),
+            "non-cursor rows should use hollow `▸`: {other_line:?}"
+        );
+    }
+
+    #[test]
+    fn expanded_output_lines_empty_when_not_expanded() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.step_outputs[0] = "  some output\n".into();
+        // expanded[0] stays false.
+
+        assert!(d.expanded_output_lines(0, 80).is_empty());
+    }
+
+    #[test]
+    fn expanded_output_lines_empty_when_no_captured_output() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.expanded[0] = true;
+        // step_outputs[0] is empty by default.
+
+        assert!(d.expanded_output_lines(0, 80).is_empty());
+    }
+
+    #[test]
+    fn expanded_output_lines_emits_one_entry_per_line() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.expanded[0] = true;
+        d.step_outputs[0] = "  line one\n  line two\n  line three\n".into();
+
+        let lines = d.expanded_output_lines(0, 80);
+        assert_eq!(lines.len(), 3);
+        // Non-diagnostic lines pass through unchanged (with their leading "  ").
+        assert_eq!(lines[0].0, "  line one");
+        assert_eq!(lines[1].0, "  line two");
+        assert_eq!(lines[2].0, "  line three");
+    }
+
+    #[test]
+    fn expanded_output_lines_highlights_current_diagnostic_on_cursor_step() {
+        use super::super::style::strip_ansi;
+        use crate::output::diagnostic::Diagnostic;
+        use std::path::PathBuf;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.cursor = 0;
+        d.expanded[0] = true;
+        d.step_outputs[0] = "  src/foo.rs:10:5: error: bad\n".into();
+        d.parsed_diagnostics[0] = vec![Diagnostic {
+            path: PathBuf::from("src/foo.rs"),
+            line: 10,
+            col: Some(5),
+        }];
+        d.current_diagnostic[0] = 0;
+
+        let lines = d.expanded_output_lines(0, 80);
+        assert_eq!(lines.len(), 1);
+        // In NO_COLOR mode the current-diagnostic marker is the filled `▶`.
+        let plain = strip_ansi(&lines[0].0);
+        assert!(
+            plain.starts_with("▶ "),
+            "current diag should lead with `▶ `: {plain:?}"
+        );
+        assert!(plain.contains("src/foo.rs:10:5"));
+    }
+
+    #[test]
+    fn footer_lines_empty_when_browse_not_active() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.run_summary = "1 passed".into();
+        // browse_active stays false.
+
+        assert!(d.footer_lines(80).is_empty());
+    }
+
+    #[test]
+    fn footer_lines_includes_summary_help_bar_and_spacer() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.browse_active = true;
+        d.run_summary = "1 passed in 1.2s".into();
+
+        let lines = d.footer_lines(80);
+        let plain: Vec<String> = lines.iter().map(|(s, _)| strip_ansi(s)).collect();
+        // Leading spacer, then summary, then blank, then help bar.
+        assert_eq!(plain[0], "");
+        assert!(plain.iter().any(|l| l.contains("1 passed in 1.2s")));
+        assert!(
+            plain.iter().any(|l| l.contains("q quit")),
+            "help bar missing from footer: {plain:#?}"
+        );
+    }
+
+    #[test]
+    fn footer_lines_swaps_help_bar_for_help_modal_when_active() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.browse_active = true;
+        d.help_modal_active = true;
+
+        let lines = d.footer_lines(80);
+        let plain: Vec<String> = lines.iter().map(|(s, _)| strip_ansi(s)).collect();
+        assert!(
+            plain.iter().any(|l| l.contains("press any key to dismiss")),
+            "expected modal footer line: {plain:#?}"
+        );
+        assert!(
+            !plain.iter().any(|l| l.contains("q quit")),
+            "help bar should not appear while modal is active: {plain:#?}"
+        );
+    }
+
+    #[test]
+    fn footer_lines_renders_hook_running_block_while_in_flight() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.browse_active = true;
+        d.hook_running = true;
+
+        let lines = d.footer_lines(80);
+        let plain: Vec<String> = lines.iter().map(|(s, _)| strip_ansi(s)).collect();
+        assert!(
+            plain.iter().any(|l| l.contains("running on_failure hook")),
+            "in-flight hook line missing: {plain:#?}"
+        );
+    }
+
+    #[test]
+    fn footer_lines_appends_transient_message_at_end() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["check".to_string()]);
+        d.browse_active = true;
+        d.transient_message = Some("no failures to rerun".into());
+
+        let lines = d.footer_lines(80);
+        let last = strip_ansi(&lines.last().unwrap().0);
+        assert!(
+            last.contains("no failures to rerun"),
+            "transient message should be the last footer entry: {last:?}"
+        );
+    }
+
+    #[test]
+    fn compute_lines_empty_state_returns_empty_layout() {
+        let d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        let (lines, top, h) = d.compute_lines(80);
+        assert!(lines.is_empty());
+        assert_eq!(top, 0);
+        assert_eq!(h, 1);
+    }
+
+    #[test]
+    fn compute_lines_anchors_cursor_to_step_offset() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string(), "b".to_string(), "c".to_string()]);
+        // `run_started` populates `run_divider`; clear it so the test exercises
+        // pure step-offset math without divider arithmetic.
+        d.run_divider.clear();
+        d.cursor = 2;
+
+        let (lines, top, h) = d.compute_lines(80);
+        assert_eq!(lines.len(), 3, "expected one row per step");
+        // Each step row is 1 terminal row at width 80, so cursor at index 2
+        // sits at rows 0+1 = 2.
+        assert_eq!(top, 2);
+        assert_eq!(h, 1);
+    }
+
+    #[test]
+    fn compute_lines_offsets_cursor_by_run_divider() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string(), "b".to_string()]);
+        d.cursor = 0;
+        d.run_divider = "── run ──".into();
+
+        let (lines, top, _) = d.compute_lines(80);
+        // [divider, step a, step b] = 3 entries; cursor on step a is at
+        // row 1, after the 1-row divider.
+        assert_eq!(lines.len(), 3);
+        assert_eq!(top, 1);
+    }
+
+    #[test]
+    fn compute_lines_shifts_cursor_anchor_by_earlier_step_expansion() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string(), "b".to_string()]);
+        d.run_divider.clear(); // isolate from the run_started divider
+        d.cursor = 1;
+        d.expanded[0] = true;
+        d.step_outputs[0] = "  line one\n  line two\n  line three\n".into();
+
+        let (lines, top, _) = d.compute_lines(80);
+        // [step a, exp1, exp2, exp3, step b] = 5 entries.
+        assert_eq!(lines.len(), 5);
+        // Cursor on step b: row 0 (step a) + rows 1..=3 (expansion) = 4.
+        assert_eq!(top, 4);
+    }
+
+    #[test]
+    fn compute_lines_appends_footer_after_step_block() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string()]);
+        d.browse_active = true;
+        d.run_summary = "1 passed in 1.2s".into();
+
+        let (lines, _, _) = d.compute_lines(80);
+        // Step row first, then the footer (spacer + summary + spacer + help bar).
+        assert!(lines.len() > 1, "expected step + footer entries");
+        let plain: Vec<String> = lines.iter().map(|(s, _)| strip_ansi(s)).collect();
+        // Step row comes before the summary line.
+        let summary_idx = plain
+            .iter()
+            .position(|l| l.contains("1 passed in 1.2s"))
+            .expect("summary line missing");
+        let step_idx = plain
+            .iter()
+            .position(|l| l.contains('a'))
+            .expect("step row missing");
+        assert!(step_idx < summary_idx, "footer should follow step block");
+    }
+
+    #[test]
+    fn capture_step_outputs_expands_failed_steps_and_points_cursor_to_first_fail() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string(), "b".to_string(), "c".to_string()]);
+
+        let results = vec![
+            mk_step_result(true, Some(0), "", ""),
+            mk_step_result(false, Some(1), "boom\n", ""),
+            mk_step_result(true, Some(0), "", ""),
+        ];
+        // Names need to match step_names for the lookup to find them.
+        let results: Vec<StepResult> = results
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut r)| {
+                r.name = d.step_names[i].clone();
+                r
+            })
+            .collect();
+
+        d.capture_step_outputs(&results);
+
+        assert_eq!(d.expanded, vec![false, true, false]);
+        // Cursor lands on step "b" (the first failing step).
+        assert_eq!(d.cursor, 1);
+        assert!(d.all_expanded, "any failure should set all_expanded");
+        assert!(
+            d.step_outputs[1].contains("boom"),
+            "captured output should preserve content: {:?}",
+            d.step_outputs[1]
+        );
+    }
+
+    #[test]
+    fn capture_step_outputs_keeps_cursor_at_zero_when_all_passed() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string(), "b".to_string()]);
+
+        let mut results = vec![
+            mk_step_result(true, Some(0), "", ""),
+            mk_step_result(true, Some(0), "", ""),
+        ];
+        results[0].name = "a".into();
+        results[1].name = "b".into();
+
+        d.capture_step_outputs(&results);
+
+        assert_eq!(d.cursor, 0);
+        assert!(!d.all_expanded);
+        assert_eq!(d.expanded, vec![false, false]);
+    }
+
+    #[test]
+    fn summary_line_formats_all_passing_branch() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string(), "b".to_string()]);
+        let mut results = vec![
+            mk_step_result(true, Some(0), "", ""),
+            mk_step_result(true, Some(0), "", ""),
+        ];
+        results[0].name = "a".into();
+        results[1].name = "b".into();
+
+        let line = strip_ansi(&d.summary_line(&results, 1.2));
+        assert!(line.contains("2 passed"), "missing pass count: {line:?}");
+        assert!(
+            line.contains("all passing · 1.2s"),
+            "missing time suffix: {line:?}"
+        );
+        assert!(!line.contains("failed"));
+    }
+
+    #[test]
+    fn summary_line_leads_with_failed_count_when_any_failed() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string(), "b".to_string()]);
+        let mut results = vec![
+            mk_step_result(false, Some(1), "boom\n", ""),
+            mk_step_result(true, Some(0), "", ""),
+        ];
+        results[0].name = "a".into();
+        results[1].name = "b".into();
+
+        let line = strip_ansi(&d.summary_line(&results, 0.5));
+        // Failed count comes first, then passed, then time without
+        // the "all passing" prefix.
+        assert!(
+            line.starts_with("1 failed"),
+            "wrong leading token: {line:?}"
+        );
+        assert!(line.contains("1 passed"));
+        assert!(
+            line.ends_with("0.5s"),
+            "expected bare time suffix: {line:?}"
+        );
+        assert!(!line.contains("all passing"));
+    }
+
+    #[test]
+    fn summary_line_includes_skipped_when_some_steps_missing_from_results() {
+        use super::super::style::strip_ansi;
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["a".to_string(), "b".to_string(), "c".to_string()]);
+        // Only one result for a 3-step pipeline → 2 skipped.
+        let mut results = vec![mk_step_result(true, Some(0), "", "")];
+        results[0].name = "a".into();
+
+        let line = strip_ansi(&d.summary_line(&results, 1.0));
+        assert!(line.contains("1 passed"));
+        assert!(
+            line.contains("2 skipped"),
+            "missing skipped count: {line:?}"
+        );
+    }
+
+    /// Convenience: drive a single key through `handle_key` against a
+    /// `TtyDisplay` already initialised with the named steps.
+    fn dispatch(d: &mut TtyDisplay, ch: char) -> BrowseAction {
+        use crossterm::event::{KeyEvent, KeyModifiers};
+        d.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn handle_key_j_moves_cursor_down_and_clamps_at_last_step() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string(), "b".to_string(), "c".to_string()]);
+
+        assert!(matches!(dispatch(&mut d, 'j'), BrowseAction::Redraw));
+        assert_eq!(d.cursor, 1);
+        dispatch(&mut d, 'j');
+        dispatch(&mut d, 'j'); // would overshoot — should clamp at n-1.
+        assert_eq!(d.cursor, 2);
+    }
+
+    #[test]
+    fn handle_key_k_moves_cursor_up_and_clamps_at_zero() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string(), "b".to_string()]);
+        d.cursor = 1;
+
+        assert!(matches!(dispatch(&mut d, 'k'), BrowseAction::Redraw));
+        assert_eq!(d.cursor, 0);
+        dispatch(&mut d, 'k'); // saturating — stays at 0.
+        assert_eq!(d.cursor, 0);
+    }
+
+    #[test]
+    fn handle_key_gg_chord_jumps_cursor_to_top() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string(), "b".to_string(), "c".to_string()]);
+        d.cursor = 2;
+
+        // First `g` is a Noop, just primes the chord.
+        assert!(matches!(dispatch(&mut d, 'g'), BrowseAction::Noop));
+        assert_eq!(d.cursor, 2);
+        // Second `g` triggers the jump.
+        assert!(matches!(dispatch(&mut d, 'g'), BrowseAction::Redraw));
+        assert_eq!(d.cursor, 0);
+    }
+
+    #[test]
+    fn handle_key_capital_g_jumps_cursor_to_bottom() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string(), "b".to_string(), "c".to_string()]);
+        d.cursor = 0;
+
+        assert!(matches!(dispatch(&mut d, 'G'), BrowseAction::Redraw));
+        assert_eq!(d.cursor, 2);
+    }
+
+    #[test]
+    fn handle_key_enter_toggles_expansion_at_cursor() {
+        use crossterm::event::{KeyEvent, KeyModifiers};
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string(), "b".to_string()]);
+        d.cursor = 1;
+        assert!(!d.expanded[1]);
+
+        d.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(d.expanded[1]);
+        assert!(!d.expanded[0], "only the cursor step should toggle");
+        d.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!d.expanded[1], "second press should toggle off");
+    }
+
+    #[test]
+    fn handle_key_o_toggles_same_as_enter() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string()]);
+        assert!(!d.expanded[0]);
+        dispatch(&mut d, 'o');
+        assert!(d.expanded[0]);
+    }
+
+    #[test]
+    fn handle_key_capital_o_toggles_expansion_for_all_steps() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert!(d.expanded.iter().all(|e| !e));
+
+        dispatch(&mut d, 'O');
+        assert!(d.expanded.iter().all(|e| *e), "all should expand");
+        dispatch(&mut d, 'O');
+        assert!(d.expanded.iter().all(|e| !e), "all should collapse");
+    }
+
+    #[test]
+    fn handle_key_q_returns_quit() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string()]);
+        assert!(matches!(dispatch(&mut d, 'q'), BrowseAction::Quit));
+    }
+
+    #[test]
+    fn handle_key_q_returns_quit_even_with_no_steps() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        // No run_started → step_names is empty.
+        assert!(matches!(dispatch(&mut d, 'q'), BrowseAction::Quit));
+    }
+
+    #[test]
+    fn handle_key_r_returns_rerun() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string()]);
+        assert!(matches!(dispatch(&mut d, 'r'), BrowseAction::Rerun));
+    }
+
+    #[test]
+    fn handle_key_f_with_failures_returns_rerun_failed() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string()]);
+        d.statuses[0] = StepStatus::Failed(Duration::from_secs(0), "boom".into());
+
+        assert!(matches!(dispatch(&mut d, 'f'), BrowseAction::RerunFailed));
+    }
+
+    #[test]
+    fn handle_key_f_without_failures_sets_transient_message_and_redraws() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string()]);
+        d.statuses[0] = StepStatus::Passed(Duration::from_secs(0));
+
+        assert!(matches!(dispatch(&mut d, 'f'), BrowseAction::Redraw));
+        assert_eq!(
+            d.transient_message.as_deref(),
+            Some("no failures to re-run")
+        );
+    }
+
+    #[test]
+    fn handle_key_unknown_key_clears_visible_message_and_promotes_to_redraw() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string()]);
+        d.transient_message = Some("stale".into());
+
+        // `x` is unrecognised — would normally be Noop, but the visible
+        // message needs a redraw to disappear.
+        assert!(matches!(dispatch(&mut d, 'x'), BrowseAction::Redraw));
+        assert!(d.transient_message.is_none());
+    }
+
+    #[test]
+    fn redraw_strategy_skips_when_nothing_was_rendered() {
+        // First paint of a run: leave whatever's on screen alone.
+        assert_eq!(redraw_strategy(0, (80, 24), (80, 24)), RedrawStrategy::Skip,);
+        // Skip wins even if the size also changed — there's still nothing
+        // to erase.
+        assert_eq!(
+            redraw_strategy(0, (80, 24), (100, 30)),
+            RedrawStrategy::Skip,
+        );
+    }
+
+    #[test]
+    fn redraw_strategy_uses_move_up_when_size_unchanged_and_fits() {
+        assert_eq!(
+            redraw_strategy(5, (80, 24), (80, 24)),
+            RedrawStrategy::MoveUp(5),
+        );
+    }
+
+    #[test]
+    fn redraw_strategy_falls_back_to_full_clear_on_width_change() {
+        assert_eq!(
+            redraw_strategy(5, (80, 24), (100, 24)),
+            RedrawStrategy::FullClear,
+        );
+    }
+
+    #[test]
+    fn redraw_strategy_falls_back_to_full_clear_on_height_change() {
+        assert_eq!(
+            redraw_strategy(5, (80, 24), (80, 30)),
+            RedrawStrategy::FullClear,
+        );
+    }
+
+    #[test]
+    fn redraw_strategy_treats_first_call_as_size_change() {
+        // last_size starts as (0, 0); any real terminal differs.
+        assert_eq!(
+            redraw_strategy(5, (0, 0), (80, 24)),
+            RedrawStrategy::FullClear,
+        );
+    }
+
+    #[test]
+    fn redraw_strategy_falls_back_to_full_clear_when_rendered_exceeds_viewport() {
+        // rendered_lines + 1 > term_height means MoveUp would have to enter
+        // scrollback — fall back to full clear instead.
+        assert_eq!(
+            redraw_strategy(24, (80, 24), (80, 24)),
+            RedrawStrategy::FullClear,
+        );
+        assert_eq!(
+            redraw_strategy(100, (80, 24), (80, 24)),
+            RedrawStrategy::FullClear,
+        );
+    }
+
+    #[test]
+    fn redraw_strategy_move_up_at_height_boundary() {
+        // rendered_lines + 1 == term_height: previous render exactly fits
+        // with one row of headroom; MoveUp is still safe.
+        assert_eq!(
+            redraw_strategy(23, (80, 24), (80, 24)),
+            RedrawStrategy::MoveUp(23),
         );
     }
 

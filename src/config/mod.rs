@@ -203,4 +203,60 @@ mod tests {
         let err = init(td.path()).unwrap_err();
         assert!(err.to_string().contains("already exists"));
     }
+
+    #[test]
+    fn not_found_error_without_global_omits_global_clause() {
+        let msg = not_found_error(&[], None);
+        assert!(msg.starts_with("no .baraddur.toml found in this directory or any parent."));
+        assert!(!msg.contains("and no "));
+        // Minimal example always present.
+        assert!(msg.contains("[watch]") && msg.contains("[[steps]]"));
+        // Empty searched list → no "(searched:" trailer.
+        assert!(!msg.contains("(searched:"));
+    }
+
+    #[test]
+    fn not_found_error_with_global_under_home_uses_tilde() {
+        let home = dirs::home_dir().expect("home dir");
+        let global = home.join(".config/baraddur.toml");
+        let msg = not_found_error(&[], Some(&global));
+        let expected_suffix = format!(
+            "and no ~{}.config/baraddur.toml.",
+            std::path::MAIN_SEPARATOR
+        );
+        assert!(
+            msg.contains(&expected_suffix),
+            "expected tilde-substituted global path in:\n{msg}"
+        );
+    }
+
+    #[test]
+    fn not_found_error_with_global_outside_home_uses_absolute_path() {
+        // A path that cannot be under the user's home directory.
+        let global = PathBuf::from("/etc/baraddur/config.toml");
+        let msg = not_found_error(&[], Some(&global));
+        assert!(
+            msg.contains("/etc/baraddur/config.toml."),
+            "expected absolute global path in:\n{msg}"
+        );
+        assert!(!msg.contains("~/etc"));
+    }
+
+    #[test]
+    fn not_found_error_lists_each_searched_path() {
+        let searched = vec![
+            PathBuf::from("/a/b/.baraddur.toml"),
+            PathBuf::from("/a/.baraddur.toml"),
+            PathBuf::from("/.baraddur.toml"),
+        ];
+        let msg = not_found_error(&searched, None);
+        assert!(msg.contains("(searched:"));
+        for p in &searched {
+            assert!(
+                msg.contains(&p.display().to_string()),
+                "searched path missing from output:\n{msg}"
+            );
+        }
+        assert!(msg.trim_end().ends_with(')'));
+    }
 }

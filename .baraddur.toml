@@ -28,6 +28,12 @@ name = "test"
 cmd = "cargo test"
 parallel = true
 
+[[steps]]
+name = "doc"
+cmd = "cargo doc --no-deps --document-private-items"
+parallel = true
+if_changed = ["src/**/*.rs"]
+
 # Demo: exercises if_changed + {files}. Save a .toml file (Cargo.toml,
 # .baraddur.toml) to see it run and echo the changed paths; save a .rs file
 # and it disappears from the step list entirely. Delete this block when done.

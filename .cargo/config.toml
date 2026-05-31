@@ -1,0 +1,5 @@
+[build]
+# Treat documentation warnings as errors — broken intra-doc links, malformed
+# `///` blocks, and missing items get caught before CI and before crates.io
+# publication. Applies to `cargo doc` from any context.
+rustdocflags = ["-D", "warnings"]

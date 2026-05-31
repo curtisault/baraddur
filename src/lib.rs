@@ -304,10 +304,7 @@ impl App {
 
                     // Cancel any leftover hook from a prior run; spawn a new
                     // one if this run failed and the user has on_failure enabled.
-                    if let Some(h) = hook_handle.take() {
-                        h.abort();
-                        display.hook_finished();
-                    }
+                    cancel_hook(&mut hook_handle, display.as_mut());
                     if self.config.on_failure.enabled && results.iter().any(|r| !r.success) {
                         let cfg = self.config.on_failure.clone();
                         let cwd = self.root.clone();
@@ -326,10 +323,7 @@ impl App {
                             eprintln!("[debug]   triggered by: {}", p.display());
                         }
                     }
-                    if let Some(h) = hook_handle.take() {
-                        h.abort();
-                        display.hook_finished();
-                    }
+                    cancel_hook(&mut hook_handle, display.as_mut());
                     let rel = rel_paths(&paths, &self.root);
                     display.run_cancelled();
                     display.set_trigger(&rel);
@@ -337,10 +331,7 @@ impl App {
                     continue;
                 }
                 RunOutcome::Shutdown => {
-                    if let Some(h) = hook_handle.take() {
-                        h.abort();
-                        display.hook_finished();
-                    }
+                    cancel_hook(&mut hook_handle, display.as_mut());
                     return self.shutdown();
                 }
                 RunOutcome::WatcherDied => {
@@ -371,13 +362,13 @@ impl App {
                         biased;
 
                         _ = &mut stop => {
-                            if let Some(h) = hook_handle.take() { h.abort(); display.hook_finished(); }
+                            cancel_hook(&mut hook_handle, display.as_mut());
                             display.exit_browse_mode();
                             return self.shutdown();
                         }
 
                         maybe = rx.recv() => {
-                            if let Some(h) = hook_handle.take() { h.abort(); display.hook_finished(); }
+                            cancel_hook(&mut hook_handle, display.as_mut());
                             display.exit_browse_mode();
                             match maybe {
                                 Some(paths) => {
@@ -406,26 +397,26 @@ impl App {
                                     BrowseAction::Noop => {}
                                     BrowseAction::Redraw => display.browse_redraw_if_active(),
                                     BrowseAction::Quit => {
-                                        if let Some(h) = hook_handle.take() { h.abort(); display.hook_finished(); }
+                                        cancel_hook(&mut hook_handle, display.as_mut());
                                         display.exit_browse_mode();
                                         return self.shutdown();
                                     }
                                     BrowseAction::Rerun => {
-                                        if let Some(h) = hook_handle.take() { h.abort(); display.hook_finished(); }
+                                        cancel_hook(&mut hook_handle, display.as_mut());
                                         display.exit_browse_mode();
                                         trigger_paths = None;
                                         rerun_filter = None;
                                         continue 'main;
                                     }
                                     BrowseAction::RerunFailed => {
-                                        if let Some(h) = hook_handle.take() { h.abort(); display.hook_finished(); }
+                                        cancel_hook(&mut hook_handle, display.as_mut());
                                         display.exit_browse_mode();
                                         trigger_paths = None;
                                         rerun_filter = last_failed_steps.clone();
                                         continue 'main;
                                     }
                                     BrowseAction::RerunCursor(name) => {
-                                        if let Some(h) = hook_handle.take() { h.abort(); display.hook_finished(); }
+                                        cancel_hook(&mut hook_handle, display.as_mut());
                                         display.exit_browse_mode();
                                         trigger_paths = None;
                                         rerun_filter = Some(vec![name]);
@@ -445,10 +436,7 @@ impl App {
                         // stays in browse until a file change or `q`.
                         res = await_hook(&mut hook_handle), if hook_handle.is_some() => {
                             hook_handle = None;
-                            match res {
-                                Ok(Ok(Some(text))) => display.hook_output(&text),
-                                _ => display.hook_finished(),
-                            }
+                            apply_hook_result(res, display.as_mut());
                         }
                     }
                 }
@@ -462,12 +450,12 @@ impl App {
                     biased;
 
                     _ = &mut stop => {
-                        if let Some(h) = hook_handle.take() { h.abort(); }
+                        cancel_hook(&mut hook_handle, display.as_mut());
                         return self.shutdown();
                     }
 
                     maybe = rx.recv() => {
-                        if let Some(h) = hook_handle.take() { h.abort(); }
+                        cancel_hook(&mut hook_handle, display.as_mut());
                         match maybe {
                             Some(paths) => {
                                 while rx.try_recv().is_ok() {}
@@ -491,10 +479,7 @@ impl App {
 
                     res = await_hook(&mut hook_handle), if hook_handle.is_some() => {
                         hook_handle = None;
-                        match res {
-                            Ok(Ok(Some(text))) => display.hook_output(&text),
-                            _ => display.hook_finished(),
-                        }
+                        apply_hook_result(res, display.as_mut());
                         // continue idle loop — wait for next event
                     }
                 }
@@ -525,6 +510,28 @@ async fn await_hook(
     match handle.as_mut() {
         Some(h) => h.await,
         None => std::future::pending().await,
+    }
+}
+
+/// Aborts an in-flight `on_failure` hook task and notifies the display.
+/// No-op when no hook is running. The display hook is a no-op on
+/// `PlainDisplay`, so this is safe to call from non-TTY paths too.
+fn cancel_hook(hook_handle: &mut Option<HookHandle>, display: &mut dyn Display) {
+    if let Some(h) = hook_handle.take() {
+        h.abort();
+        display.hook_finished();
+    }
+}
+
+/// Routes a settled hook's result to the display: forwards captured output
+/// when present, otherwise clears the "running…" footer slot.
+fn apply_hook_result(
+    res: std::result::Result<Result<Option<String>>, tokio::task::JoinError>,
+    display: &mut dyn Display,
+) {
+    match res {
+        Ok(Ok(Some(text))) => display.hook_output(&text),
+        _ => display.hook_finished(),
     }
 }
 

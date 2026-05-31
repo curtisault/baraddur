@@ -33,7 +33,16 @@ fmt:
 fmt-check:
     cargo fmt --check
 
-ci: fmt-check lint test
+ci: fmt-check lint crap
+
+# Regenerate docs/crap-and-code-cov.md from current coverage + complexity.
+# Requires `cargo-llvm-cov` and `cargo-crap` to be installed locally. Wired
+# into `ci` so the tracked snapshot stays in sync with each green run.
+# `cargo llvm-cov` runs the test suite under instrumentation and propagates
+# any test failure, so `ci` doesn't need a separate `test` step.
+crap:
+    cargo llvm-cov --lcov --output-path lcov.info
+    ./scripts/crap.sh
 
 # Audit GitHub Action SHA pins against current upstream.
 check-pins:
