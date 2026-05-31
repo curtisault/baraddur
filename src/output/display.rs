@@ -453,9 +453,14 @@ pub struct TtyDisplay {
     /// command without actually exec'ing a subprocess. Default uses
     /// `$VISUAL` → `$EDITOR` → `vi` with `+LINE FILE`.
     editor_spawn: EditorSpawn,
-    /// True while the `?` help modal is showing. The modal replaces the
-    /// one-line help bar with a vertical key reference. Any key dismisses.
+    /// True while the `?` help modal is showing. The modal is rendered as
+    /// a centered bordered overlay on top of the normal browse view. Any
+    /// key dismisses.
     help_modal_active: bool,
+    /// Whether the modal overlay was painted during the previous redraw.
+    /// Used to force a `FullClear` on the next paint so overlay rows above
+    /// the main content's tracked `rendered_lines` are erased properly.
+    help_painted_last: bool,
 }
 
 /// `(file, line, col?)` → spawn-and-wait outcome. Returns `Ok(())` when the
@@ -522,6 +527,7 @@ impl TtyDisplay {
             current_diagnostic: Vec::new(),
             editor_spawn: Box::new(default_editor_spawn),
             help_modal_active: false,
+            help_painted_last: false,
         }
     }
 
@@ -972,18 +978,12 @@ impl TtyDisplay {
             out.push((String::new(), 1));
         }
 
-        if self.help_modal_active {
-            for line in self.help_modal_lines() {
-                let r = Self::visual_rows_for(&line, width) as usize;
-                out.push((line, r));
-            }
-        } else {
-            // Grouped, symbol-led, fits ~80 cols.
-            let help = "  ↕ j/k   ⏎ toggle   ▸ n/p/e   ↺ r/f/c   ? help · q quit";
-            let help_styled = format!("{}", self.theme.dim(help));
-            let r = Self::visual_rows_for(&help_styled, width) as usize;
-            out.push((help_styled, r));
-        }
+        // Grouped, symbol-led, fits ~80 cols. Stays visible even when the
+        // `?` modal is open — the modal floats on top as an overlay.
+        let help = "  ↕ j/k   ⏎ toggle   ▸ n/p/e   ↺ r/f/c   ? help · q quit";
+        let help_styled = format!("{}", self.theme.dim(help));
+        let r = Self::visual_rows_for(&help_styled, width) as usize;
+        out.push((help_styled, r));
 
         if let Some(msg) = &self.transient_message {
             let line = format!("  {}", self.theme.yellow(msg));
@@ -1059,6 +1059,14 @@ impl TtyDisplay {
         }
         self.browse_scroll = self.browse_scroll.min(total_rows.saturating_sub(viewport));
 
+        // Force a full clear when the modal is involved (entering, leaving,
+        // or while visible). The overlay paints absolute-positioned rows that
+        // may sit above the tracked `rendered_lines`, so an incremental
+        // `MoveUp` would leave ghost rows behind.
+        if self.help_modal_active || self.help_painted_last {
+            self.last_term_size = (0, 0);
+        }
+
         // ── Erase previous render, then print the viewport ───────────────
         self.prepare_redraw_region();
 
@@ -1084,7 +1092,59 @@ impl TtyDisplay {
         }
 
         self.rendered_lines = rendered as u16;
+
+        if self.help_modal_active {
+            self.draw_help_modal_overlay();
+        }
+        self.help_painted_last = self.help_modal_active;
+
         let _ = stdout.flush();
+    }
+
+    /// Paints the `?` help as a centered bordered box on top of the current
+    /// view. Uses absolute cursor positioning so the overlay floats over
+    /// existing content instead of being clipped at the bottom of the
+    /// scroll viewport. The caller is responsible for forcing a `FullClear`
+    /// on the next paint so the overlay rows are wiped on dismiss.
+    fn draw_help_modal_overlay(&self) {
+        let mut stdout = std::io::stdout();
+        let term_w = Self::term_width();
+        let term_h = Self::term_height() as usize;
+        let lines = self.help_modal_lines();
+
+        // Modal width fits the widest content line plus a 1-col border on
+        // each side; cap to the terminal so we never spill off-screen.
+        let content_w = lines.iter().map(|l| visible_len(l)).max().unwrap_or(0);
+        let modal_w = (content_w + 2).min(term_w.saturating_sub(2)).max(8);
+        // Plus 2 for top/bottom border. Cap so it always fits.
+        let modal_h = (lines.len() + 2).min(term_h.saturating_sub(1)).max(3);
+        let top = term_h.saturating_sub(modal_h) / 2;
+        let left = term_w.saturating_sub(modal_w) / 2;
+
+        let inner_w = modal_w.saturating_sub(2);
+        let top_border = format!("╭{}╮", "─".repeat(inner_w));
+        let bot_border = format!("╰{}╯", "─".repeat(inner_w));
+        let side = format!("{}", self.theme.cyan("│"));
+
+        execute!(stdout, cursor::MoveTo(left as u16, top as u16)).ok();
+        print!("{}", self.theme.cyan(&top_border));
+
+        // Content rows — clipped to fit inside (modal_h - 2) rows.
+        let max_rows = modal_h.saturating_sub(2);
+        for (i, line) in lines.iter().take(max_rows).enumerate() {
+            let row = (top + 1 + i) as u16;
+            execute!(stdout, cursor::MoveTo(left as u16, row)).ok();
+            let vis = visible_len(line);
+            let pad = inner_w.saturating_sub(vis);
+            print!("{side}{line}{:pad$}{side}", "");
+        }
+
+        execute!(
+            stdout,
+            cursor::MoveTo(left as u16, (top + modal_h - 1) as u16)
+        )
+        .ok();
+        print!("{}", self.theme.cyan(&bot_border));
     }
 
     fn index_of(&self, name: &str) -> usize {
@@ -2099,9 +2159,12 @@ mod tests {
     }
 
     #[test]
-    fn footer_lines_swaps_help_bar_for_help_modal_when_active() {
+    fn footer_lines_keeps_help_bar_when_modal_is_active() {
         use super::super::style::strip_ansi;
 
+        // The modal is now a floating overlay painted on top of the browse
+        // view; the one-line help bar in the footer stays put so layout
+        // doesn't reflow when toggling `?`.
         let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
         d.run_started(&["check".to_string()]);
         d.browse_active = true;
@@ -2110,12 +2173,12 @@ mod tests {
         let lines = d.footer_lines(80);
         let plain: Vec<String> = lines.iter().map(|(s, _)| strip_ansi(s)).collect();
         assert!(
-            plain.iter().any(|l| l.contains("press any key to dismiss")),
-            "expected modal footer line: {plain:#?}"
+            plain.iter().any(|l| l.contains("q quit")),
+            "help bar should remain in footer while modal is active: {plain:#?}"
         );
         assert!(
-            !plain.iter().any(|l| l.contains("q quit")),
-            "help bar should not appear while modal is active: {plain:#?}"
+            !plain.iter().any(|l| l.contains("press any key to dismiss")),
+            "modal content should not be inlined into the footer: {plain:#?}"
         );
     }
 
