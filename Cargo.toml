@@ -22,7 +22,7 @@ name = "baraddur"
 path = "src/lib.rs"
 
 [dependencies]
-notify-debouncer-mini = "0.7"
+notify = "8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "signal", "time", "io-util"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

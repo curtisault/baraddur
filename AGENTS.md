@@ -24,7 +24,7 @@ src/
 ├── config/          # Walk-up .baraddur.toml discovery, serde structs, validation
 ├── pipeline/        # Stage grouping, parallel execution (tokio::task::JoinSet), step runner
 ├── output/          # Display trait + PlainDisplay (CI) and TtyDisplay (interactive) impls
-└── watcher/         # notify-debouncer-mini setup, extension filtering
+└── watcher/         # raw notify watcher + manual debounce; drops Access (read/open) events, extension filtering
 ```
 
 ### Key patterns

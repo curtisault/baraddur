@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
-use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode};
+use notify::{EventKind, RecursiveMode, Watcher};
 use std::path::PathBuf;
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -27,44 +28,72 @@ pub fn start(cfg: WatchConfig) -> Result<mpsc::Receiver<WatchEvent>> {
 }
 
 fn watcher_thread(cfg: WatchConfig, tx: mpsc::Sender<WatchEvent>) {
-    let (sync_tx, sync_rx) = std::sync::mpsc::channel();
+    let (raw_tx, raw_rx) = std::sync::mpsc::channel();
 
-    let mut debouncer = match new_debouncer(cfg.debounce, sync_tx) {
-        Ok(d) => d,
+    // Raw notify rather than a debouncer: we need the per-event `EventKind` to
+    // drop read/open (`Access`) events. notify-debouncer-mini collapses every
+    // kind to `Any`, so a build that merely *reads* every source file looked
+    // identical to a write and self-triggered an endless restart loop on
+    // Linux/inotify (macOS/FSEvents never reports opens). We debounce here.
+    let mut watcher = match notify::recommended_watcher(move |res| {
+        let _ = raw_tx.send(res);
+    }) {
+        Ok(w) => w,
         Err(e) => {
-            eprintln!("baraddur: failed to start debouncer: {e}");
+            eprintln!("baraddur: failed to start watcher: {e}");
             return;
         }
     };
 
-    if let Err(e) = debouncer
-        .watcher()
-        .watch(&cfg.root, RecursiveMode::Recursive)
-    {
+    if let Err(e) = watcher.watch(&cfg.root, RecursiveMode::Recursive) {
         eprintln!("baraddur: failed to watch {}: {e}", cfg.root.display());
         return;
     }
 
-    for batch in sync_rx {
-        let events = match batch {
-            Ok(events) => events,
-            Err(err) => {
-                eprintln!("baraddur: watch error: {err}");
-                continue;
+    // Accumulate matching mutation paths; flush them as one batch after a quiet
+    // gap of `cfg.debounce`. While nothing is pending we block indefinitely.
+    let mut pending: Vec<PathBuf> = Vec::new();
+
+    loop {
+        let received = if pending.is_empty() {
+            raw_rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
+        } else {
+            match raw_rx.recv_timeout(cfg.debounce) {
+                Ok(ev) => Ok(ev),
+                Err(RecvTimeoutError::Timeout) => {
+                    let batch = std::mem::take(&mut pending);
+                    if tx.blocking_send(batch).is_err() {
+                        return; // receiver dropped — app is shutting down
+                    }
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => Err(RecvTimeoutError::Disconnected),
             }
         };
 
-        let paths: Vec<PathBuf> = events
-            .into_iter()
-            .filter(|ev| matches_filters(&ev.path, &cfg))
-            .map(|ev| ev.path)
-            .collect();
-
-        if !paths.is_empty() && tx.blocking_send(paths).is_err() {
-            // Receiver dropped — app is shutting down.
-            break;
+        match received {
+            Ok(Ok(event)) => {
+                if !is_mutation(&event.kind) {
+                    continue;
+                }
+                for path in event.paths {
+                    if matches_filters(&path, &cfg) && !pending.contains(&path) {
+                        pending.push(path);
+                    }
+                }
+            }
+            Ok(Err(e)) => eprintln!("baraddur: watch error: {e}"),
+            Err(_) => return, // watcher dropped / channel closed
         }
     }
+}
+
+/// Returns `false` for read/open (`Access`) events — those are not changes we
+/// should rebuild on. Everything else (Create/Modify/Remove/Rename, plus the
+/// generic `Any`/`Other` that fallback backends emit) counts as a mutation so
+/// non-inotify platforms keep triggering normally.
+fn is_mutation(kind: &EventKind) -> bool {
+    !matches!(kind, EventKind::Access(_))
 }
 
 fn matches_filters(path: &std::path::Path, cfg: &WatchConfig) -> bool {
@@ -181,5 +210,29 @@ mod tests {
             std::path::Path::new("/project/lib/generated/foo.ex"),
             &c
         ));
+    }
+
+    #[test]
+    fn access_events_are_not_mutations() {
+        use notify::event::{AccessKind, AccessMode};
+        // A build reading source files emits Access(Open/Read/Close); these
+        // must never trigger a rerun, or the pipeline loops on its own reads.
+        assert!(!is_mutation(&EventKind::Access(AccessKind::Open(
+            AccessMode::Any
+        ))));
+        assert!(!is_mutation(&EventKind::Access(AccessKind::Read)));
+        assert!(!is_mutation(&EventKind::Access(AccessKind::Any)));
+    }
+
+    #[test]
+    fn writes_creates_and_fallback_kinds_are_mutations() {
+        use notify::event::{CreateKind, ModifyKind, RemoveKind};
+        assert!(is_mutation(&EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Content
+        ))));
+        assert!(is_mutation(&EventKind::Create(CreateKind::File)));
+        assert!(is_mutation(&EventKind::Remove(RemoveKind::File)));
+        // Fallback/polling backends report `Any`; keep triggering on those.
+        assert!(is_mutation(&EventKind::Any));
     }
 }

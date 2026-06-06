@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod git;
+mod loop_guard;
 pub mod output;
 pub mod pipeline;
 pub mod watcher;
@@ -10,14 +11,37 @@ use anyhow::Result;
 use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
+use crate::loop_guard::LoopGuard;
 use crate::output::style::{Theme, should_color};
 use crate::output::{
     BrowseAction, Display, DisplayConfig, JsonDisplay, OutputFormat, PlainDisplay, TtyDisplay,
 };
 use crate::pipeline::StepResult;
+
+/// Emits a timestamped `[debug]` line to stderr, but only at `Debug`
+/// verbosity. Centralizing the timestamp is the whole point: a restart loop is
+/// obvious in the scrollback when each line is stamped, where bare `[debug]`
+/// lines are not.
+macro_rules! debug_log {
+    ($dc:expr, $($arg:tt)*) => {
+        if $dc.verbosity == $crate::output::Verbosity::Debug {
+            eprintln!(
+                "[debug {}] {}",
+                ::chrono::Local::now().format("%H:%M:%S%.3f"),
+                format_args!($($arg)*)
+            );
+        }
+    };
+}
+
+/// Loop-guard tuning. A genuine human rarely produces 5 distinct debounced
+/// file-change batches inside 10s; a self-inflicted loop does so easily.
+const LOOP_WINDOW: Duration = Duration::from_secs(10);
+const LOOP_THRESHOLD: usize = 5;
+const LOOP_COOLDOWN: Duration = Duration::from_secs(5);
 
 /// Result of the spawned on_failure hook task. Outer Result is the join
 /// result; inner is `run_hook`'s return — `Some(text)` if the hook produced
@@ -145,7 +169,7 @@ impl App {
         )
         .await?;
 
-        write_run_log(&self.root, &results);
+        log_run_outcome(write_run_log(&self.root, &results), dc);
 
         let success = results.iter().all(|r| r.success);
 
@@ -236,9 +260,7 @@ impl App {
             None
         };
 
-        if dc.verbosity == output::Verbosity::Debug {
-            eprintln!("[debug] watcher started, running initial pipeline");
-        }
+        debug_log!(dc, "watcher started, running initial pipeline");
 
         // In-flight on_failure hook task, set after a failing run and cleared
         // when it completes, the user saves a file, or shutdown begins.
@@ -260,7 +282,34 @@ impl App {
         // path-filtering left. Reset to `None` after each run completes.
         let mut rerun_filter: Option<Vec<String>> = None;
 
+        // Self-inflicted-loop detection. `file_triggered` is set by every
+        // file-change arm (all of which route back to the top of 'main) and
+        // consumed here, giving the guard a single chokepoint regardless of
+        // which arm fired. User-initiated reruns (browse `r`/`f`/`c`) leave it
+        // false, so they never count toward the loop budget.
+        let mut guard = LoopGuard::new(LOOP_WINDOW, LOOP_THRESHOLD);
+        let mut file_triggered = false;
+
         'main: loop {
+            if file_triggered {
+                file_triggered = false;
+                if guard.record(Instant::now()) {
+                    guard.reset();
+                    warn_loop(trigger_paths.as_deref().unwrap_or(&[]));
+                    match cooldown(&mut stop, &mut rx, LOOP_COOLDOWN).await {
+                        Flow::Resume => {}
+                        Flow::Shutdown => {
+                            cancel_hook(&mut hook_handle, display.as_mut());
+                            return self.shutdown();
+                        }
+                        Flow::WatcherDied => {
+                            eprintln!("baraddur: file watcher stopped unexpectedly. exiting.");
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
             let outcome = tokio::select! {
                 biased;
 
@@ -288,7 +337,7 @@ impl App {
             match outcome {
                 RunOutcome::Completed(result) => {
                     let results = result?;
-                    write_run_log(&self.root, &results);
+                    log_run_outcome(write_run_log(&self.root, &results), dc);
 
                     // Remember which steps failed so the browse-mode `f` key
                     // can rerun them; reset the filter so the next iteration
@@ -317,17 +366,16 @@ impl App {
                 }
                 RunOutcome::FileChange(paths) => {
                     while rx.try_recv().is_ok() {}
-                    if dc.verbosity == output::Verbosity::Debug {
-                        eprintln!("[debug] file change — restarting pipeline");
-                        for p in &paths {
-                            eprintln!("[debug]   triggered by: {}", p.display());
-                        }
+                    debug_log!(dc, "file change — restarting pipeline");
+                    for p in &paths {
+                        debug_log!(dc, "  triggered by: {}", p.display());
                     }
                     cancel_hook(&mut hook_handle, display.as_mut());
                     let rel = rel_paths(&paths, &self.root);
                     display.run_cancelled();
                     display.set_trigger(&rel);
                     trigger_paths = Some(rel);
+                    file_triggered = true;
                     continue;
                 }
                 RunOutcome::Shutdown => {
@@ -341,9 +389,7 @@ impl App {
             }
 
             // ── Idle: wait for the next file change or Ctrl+C ───────────────
-            if dc.verbosity == output::Verbosity::Debug {
-                eprintln!("[debug] idle — waiting for file change");
-            }
+            debug_log!(dc, "idle — waiting for file change");
 
             // In TTY mode, enter interactive browse mode so the user can
             // navigate steps and expand output with vim-style keybindings.
@@ -373,15 +419,14 @@ impl App {
                             match maybe {
                                 Some(paths) => {
                                     while rx.try_recv().is_ok() {}
-                                    if dc.verbosity == output::Verbosity::Debug {
-                                        eprintln!("[debug] file change — triggering pipeline");
-                                        for p in &paths {
-                                            eprintln!("[debug]   triggered by: {}", p.display());
-                                        }
+                                    debug_log!(dc, "file change — triggering pipeline");
+                                    for p in &paths {
+                                        debug_log!(dc, "  triggered by: {}", p.display());
                                     }
                                     let rel = rel_paths(&paths, &self.root);
                                     display.set_trigger(&rel);
                                     trigger_paths = Some(rel);
+                                    file_triggered = true;
                                     continue 'main;
                                 }
                                 None => {
@@ -459,15 +504,14 @@ impl App {
                         match maybe {
                             Some(paths) => {
                                 while rx.try_recv().is_ok() {}
-                                if dc.verbosity == output::Verbosity::Debug {
-                                    eprintln!("[debug] file change — triggering pipeline");
-                                    for p in &paths {
-                                        eprintln!("[debug]   triggered by: {}", p.display());
-                                    }
+                                debug_log!(dc, "file change — triggering pipeline");
+                                for p in &paths {
+                                    debug_log!(dc, "  triggered by: {}", p.display());
                                 }
                                 let rel = rel_paths(&paths, &self.root);
                                 display.set_trigger(&rel);
                                 trigger_paths = Some(rel);
+                                file_triggered = true;
                                 break 'idle; // fall through to loop top → rerun pipeline
                             }
                             None => {
@@ -561,13 +605,13 @@ fn spawn_key_reader() -> tokio::sync::mpsc::Receiver<crossterm::event::KeyEvent>
     rx
 }
 
-/// Writes all step output for the last run to `.baraddur/last-run.log`.
-/// Silently no-ops if the directory cannot be created or the file cannot be written.
-fn write_run_log(root: &Path, results: &[StepResult]) {
+/// Writes all step output for the last run to `.baraddur/last-run.log` and
+/// returns the path written. Errors are surfaced to the caller (see
+/// `log_run_outcome`) rather than silently swallowed, so "the log isn't being
+/// created" is diagnosable instead of invisible.
+fn write_run_log(root: &Path, results: &[StepResult]) -> std::io::Result<PathBuf> {
     let log_dir = root.join(".baraddur");
-    if std::fs::create_dir_all(&log_dir).is_err() {
-        return;
-    }
+    std::fs::create_dir_all(&log_dir)?;
 
     let mut content = String::new();
     for r in results {
@@ -593,7 +637,88 @@ fn write_run_log(root: &Path, results: &[StepResult]) {
         content.push('\n');
     }
 
-    let _ = std::fs::write(log_dir.join("last-run.log"), &content);
+    let path = log_dir.join("last-run.log");
+    std::fs::write(&path, &content)?;
+    Ok(path)
+}
+
+/// Reports the result of `write_run_log`. Success is debug-only noise; failure
+/// is always surfaced because a run log that silently never appears is exactly
+/// the kind of thing the user can't otherwise diagnose.
+fn log_run_outcome(outcome: std::io::Result<PathBuf>, dc: &DisplayConfig) {
+    match outcome {
+        Ok(path) => debug_log!(dc, "wrote run log: {}", path.display()),
+        Err(e) => eprintln!("baraddur: failed to write .baraddur/last-run.log: {e}"),
+    }
+}
+
+/// Prints the always-on warning emitted when the loop guard trips, naming the
+/// paths behind the latest restart so the user can fix the offending step or
+/// add the paths to `[watch].ignore`.
+fn warn_loop(paths: &[PathBuf]) {
+    eprintln!(
+        "baraddur: restart loop detected — the pipeline restarted {LOOP_THRESHOLD} times within {}s.",
+        LOOP_WINDOW.as_secs()
+    );
+    eprintln!(
+        "baraddur: a step is likely modifying watched files (e.g. a formatter), which the watcher re-detects."
+    );
+    if paths.is_empty() {
+        eprintln!("baraddur: (no triggering paths recorded for the latest restart)");
+    } else {
+        eprintln!("baraddur: latest restart triggered by:");
+        for p in paths.iter().take(10) {
+            eprintln!("baraddur:   {}", p.display());
+        }
+        if paths.len() > 10 {
+            eprintln!("baraddur:   … and {} more", paths.len() - 10);
+        }
+    }
+    eprintln!(
+        "baraddur: pausing {}s to let changes settle. add these paths to [watch].ignore or fix the step to stop this.",
+        LOOP_COOLDOWN.as_secs()
+    );
+}
+
+/// Outcome of a loop-guard `cooldown`.
+enum Flow {
+    /// Cooldown elapsed; resume normal operation.
+    Resume,
+    /// Stop signal fired during the cooldown.
+    Shutdown,
+    /// Watcher channel closed during the cooldown.
+    WatcherDied,
+}
+
+/// Waits out a loop-guard cooldown: drains and ignores file-change events for
+/// `dur` so self-inflicted churn settles, then resumes. Returns early if the
+/// stop signal fires or the watcher dies. Draining (rather than buffering)
+/// means the post-cooldown run uses the current file state, not a backlog.
+async fn cooldown<F>(
+    stop: &mut std::pin::Pin<&mut F>,
+    rx: &mut tokio::sync::mpsc::Receiver<watcher::WatchEvent>,
+    dur: Duration,
+) -> Flow
+where
+    F: Future<Output = ()>,
+{
+    let deadline = tokio::time::Instant::now() + dur;
+    loop {
+        tokio::select! {
+            biased;
+
+            _ = stop.as_mut() => return Flow::Shutdown,
+
+            _ = tokio::time::sleep_until(deadline) => return Flow::Resume,
+
+            maybe = rx.recv() => {
+                match maybe {
+                    Some(_) => { while rx.try_recv().is_ok() {} }
+                    None => return Flow::WatcherDied,
+                }
+            }
+        }
+    }
 }
 
 fn rel_paths(paths: &[PathBuf], root: &Path) -> Vec<PathBuf> {
