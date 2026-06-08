@@ -16,25 +16,26 @@ The cleanup plan for the remaining flagged functions lives in
 
 <!-- cargo-crap-report -->
 
-## ⚠️ 3 function(s) exceed CRAP threshold 30
+## ⚠️ 4 function(s) exceed CRAP threshold 30
 
 | | CRAP | CC | Cov % | Function | Location |
 |---|---:|---:|---:|---|---|
+| ✗ | 120.5 | 23 | 43.1 | `App::run_until` | `./src/lib.rs:222` |
 | ✗ | 110.0 | 10 | 0.0 | `TtyDisplay::browse_redraw` | `./src/output/display.rs:1043` |
-| ✗ | 101.9 | 21 | 43.2 | `App::run_until` | `./src/lib.rs:198` |
 | ✗ | 72.0 | 8 | 0.0 | `TtyDisplay::run_finished` | `./src/output/display.rs:1388` |
+| ✗ | 42.4 | 17 | 55.6 | `watcher_thread` | `./src/watcher/mod.rs:30` |
 | ▲ | 28.1 | 12 | 51.9 | `TtyDisplay::redraw` | `./src/output/display.rs:738` |
 | ▲ | 26.2 | 26 | 93.2 | `TtyDisplay::handle_key` | `./src/output/display.rs:1485` |
 | ▲ | 21.0 | 20 | 86.4 | `validate` | `./src/config/validate.rs:25` |
 | ▲ | 20.3 | 8 | 42.3 | `format_truncated_output` | `./src/output/display.rs:64` |
 | ▲ | 20.0 | 20 | 95.9 | `main` | `./src/main.rs:140` |
+| ▲ | 20.0 | 4 | 0.0 | `warn_loop` | `./src/lib.rs:658` |
 | ▲ | 19.0 | 19 | 95.7 | `parse_path_line_col` | `./src/output/diagnostic.rs:79` |
 | ▲ | 15.3 | 13 | 76.0 | `TtyDisplay::step_row` | `./src/output/display.rs:821` |
 | ▲ | 13.3 | 11 | 73.3 | `PlainDisplay::run_finished` | `./src/output/display.rs:302` |
-| ▲ | 12.0 | 3 | 0.0 | `exec_wrapped` | `./src/lib.rs:609` |
+| ▲ | 12.0 | 3 | 0.0 | `exec_wrapped` | `./src/lib.rs:734` |
 | ▲ | 12.0 | 3 | 0.0 | `default_editor_spawn` | `./src/output/display.rs:131` |
 | ▲ | 12.0 | 3 | 0.0 | `PlainDisplay::steps_skipped` | `./src/output/display.rs:287` |
-| ▲ | 11.7 | 9 | 67.9 | `watcher_thread` | `./src/watcher/mod.rs:29` |
 | ▲ | 11.2 | 8 | 63.2 | `run_parallel_stage` | `./src/pipeline/runner.rs:107` |
 | ▲ | 11.1 | 11 | 90.3 | `build_app` | `./src/main.rs:259` |
 | ▲ | 11.1 | 11 | 91.1 | `run_hook` | `./src/pipeline/hook.rs:57` |
@@ -42,13 +43,13 @@ The cleanup plan for the remaining flagged functions lives in
 | ✓ | 10.0 | 10 | 100.0 | `filter_and_template` | `./src/pipeline/filter.rs:23` |
 | ✓ | 9.7 | 4 | 29.2 | `TtyDisplay::prepare_redraw_region` | `./src/output/display.rs:567` |
 | ✓ | 9.4 | 9 | 83.3 | `extract_line` | `./src/output/diagnostic.rs:45` |
-| ✓ | 9.0 | 9 | 97.1 | `App::run_once` | `./src/lib.rs:118` |
+| ✓ | 9.0 | 9 | 97.1 | `App::run_once` | `./src/lib.rs:142` |
 | ✓ | 9.0 | 9 | 100.0 | `run_pipeline` | `./src/pipeline/runner.rs:27` |
-| ✓ | 8.0 | 8 | 94.1 | `matches_filters` | `./src/watcher/mod.rs:70` |
+| ✓ | 8.8 | 8 | 76.9 | `write_run_log` | `./src/lib.rs:612` |
+| ✓ | 8.0 | 8 | 94.1 | `matches_filters` | `./src/watcher/mod.rs:99` |
 | ✓ | 8.0 | 8 | 95.2 | `resolve_trigger` | `./src/main.rs:224` |
 | ✓ | 8.0 | 8 | 100.0 | `short_diagnostic` | `./src/output/display.rs:100` |
 | ✓ | 8.0 | 8 | 100.0 | `TtyDisplay::help_modal_lines` | `./src/output/display.rs:639` |
-| ✓ | 8.0 | 7 | 73.1 | `write_run_log` | `./src/lib.rs:566` |
 | ✓ | 7.2 | 7 | 82.9 | `TtyDisplay::footer_lines` | `./src/output/display.rs:951` |
 | ✓ | 7.1 | 7 | 88.2 | `TtyDisplay::expanded_output_lines` | `./src/output/display.rs:894` |
 | ✓ | 7.0 | 7 | 91.4 | `not_found_error` | `./src/config/mod.rs:138` |
@@ -56,6 +57,7 @@ The cleanup plan for the remaining flagged functions lives in
 | ✓ | 7.0 | 7 | 100.0 | `load_from` | `./src/config/mod.rs:95` |
 | ✓ | 7.0 | 5 | 57.1 | `run_init` | `./src/main.rs:300` |
 | ✓ | 6.3 | 5 | 62.5 | `Cli::verbosity` | `./src/main.rs:126` |
+| ✓ | 6.0 | 2 | 0.0 | `cooldown` | `./src/lib.rs:697` |
 | ✓ | 6.0 | 2 | 0.0 | `PlainDisplay::run_cancelled` | `./src/output/display.rs:296` |
 | ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::raw_mode_on` | `./src/output/display.rs:595` |
 | ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::raw_mode_off` | `./src/output/display.rs:608` |
@@ -68,7 +70,7 @@ The cleanup plan for the remaining flagged functions lives in
 | ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::hook_output` | `./src/output/display.rs:1461` |
 | ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::hook_started` | `./src/output/display.rs:1471` |
 | ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::hook_finished` | `./src/output/display.rs:1478` |
-| ✓ | 5.6 | 5 | 71.4 | `App::gate` | `./src/lib.rs:173` |
+| ✓ | 5.6 | 5 | 71.4 | `App::gate` | `./src/lib.rs:197` |
 | ✓ | 5.4 | 5 | 75.0 | `run` | `./src/pipeline/step.rs:29` |
 | ✓ | 5.3 | 3 | 36.4 | `PlainDisplay::hook_output` | `./src/output/display.rs:344` |
 | ✓ | 5.2 | 5 | 80.0 | `TtyDisplay::capture_step_outputs` | `./src/output/display.rs:1186` |
@@ -84,32 +86,34 @@ The cleanup plan for the remaining flagged functions lives in
 | ✓ | 4.0 | 4 | 100.0 | `PlainDisplay::step_finished` | `./src/output/display.rs:269` |
 | ✓ | 4.0 | 4 | 100.0 | `TtyDisplay::summary_line` | `./src/output/display.rs:1213` |
 | ✓ | 4.0 | 4 | 100.0 | `parse` | `./src/output/diagnostic.rs:28` |
-| ✓ | 3.7 | 3 | 57.1 | `App::build_display` | `./src/lib.rs:96` |
+| ✓ | 3.7 | 3 | 57.1 | `App::build_display` | `./src/lib.rs:120` |
 | ✓ | 3.4 | 3 | 64.7 | `run_git` | `./src/git.rs:57` |
 | ✓ | 3.3 | 2 | 30.6 | `TtyDisplay::banner` | `./src/output/display.rs:1245` |
 | ✓ | 3.3 | 3 | 68.8 | `TtyDisplay::with_terminal_released` | `./src/output/display.rs:618` |
 | ✓ | 3.1 | 3 | 77.8 | `TtyDisplay::drop` | `./src/output/display.rs:472` |
+| ✓ | 3.1 | 3 | 80.0 | `log_run_outcome` | `./src/lib.rs:648` |
 | ✓ | 3.0 | 3 | 83.3 | `TtyDisplay::visual_rows_for` | `./src/output/display.rs:548` |
-| ✓ | 3.0 | 3 | 85.7 | `await_hook` | `./src/lib.rs:507` |
+| ✓ | 3.0 | 3 | 85.7 | `await_hook` | `./src/lib.rs:551` |
 | ✓ | 3.0 | 3 | 86.0 | `TtyDisplay::run_started` | `./src/output/display.rs:1297` |
-| ✓ | 3.0 | 3 | 87.5 | `apply_hook_result` | `./src/lib.rs:528` |
+| ✓ | 3.0 | 3 | 87.5 | `apply_hook_result` | `./src/lib.rs:572` |
 | ✓ | 3.0 | 3 | 92.3 | `TtyDisplay::advance_diagnostic` | `./src/output/display.rs:693` |
 | ✓ | 3.0 | 3 | 100.0 | `build_globset` | `./src/pipeline/filter.rs:64` |
 | ✓ | 3.0 | 3 | 100.0 | `walk_up` | `./src/config/discovery.rs:8` |
 | ✓ | 3.0 | 3 | 100.0 | `init` | `./src/config/mod.rs:127` |
-| ✓ | 3.0 | 3 | 100.0 | `apply_profile` | `./src/lib.rs:45` |
+| ✓ | 3.0 | 3 | 100.0 | `apply_profile` | `./src/lib.rs:69` |
 | ✓ | 3.0 | 3 | 100.0 | `suppress_echo` | `./src/output/display.rs:29` |
 | ✓ | 3.0 | 3 | 100.0 | `Styled::fmt` | `./src/output/style.rs:22` |
 | ✓ | 3.0 | 3 | 100.0 | `diff_since` | `./src/git.rs:45` |
+| ✓ | 3.0 | 3 | 100.0 | `LoopGuard::record` | `./src/loop_guard.rs:33` |
 | ✓ | 3.0 | 3 | 100.0 | `OutputFormat::from` | `./src/main.rs:117` |
 | ✓ | 2.3 | 2 | 57.1 | `truncate_capture` | `./src/pipeline/step.rs:78` |
-| ✓ | 2.1 | 2 | 66.7 | `cancel_hook` | `./src/lib.rs:519` |
+| ✓ | 2.1 | 2 | 66.7 | `cancel_hook` | `./src/lib.rs:563` |
 | ✓ | 2.1 | 2 | 66.7 | `PlainDisplay::hook_started` | `./src/output/display.rs:356` |
-| ✓ | 2.0 | 2 | 100.0 | `start` | `./src/watcher/mod.rs:18` |
+| ✓ | 2.0 | 2 | 100.0 | `start` | `./src/watcher/mod.rs:19` |
 | ✓ | 2.0 | 1 | 0.0 | `default_true` | `./src/config/schema.rs:61` |
-| ✓ | 2.0 | 1 | 0.0 | `App::run` | `./src/lib.rs:86` |
-| ✓ | 2.0 | 1 | 0.0 | `spawn_key_reader` | `./src/lib.rs:544` |
-| ✓ | 2.0 | 1 | 0.0 | `rel_paths` | `./src/lib.rs:599` |
+| ✓ | 2.0 | 1 | 0.0 | `App::run` | `./src/lib.rs:110` |
+| ✓ | 2.0 | 1 | 0.0 | `spawn_key_reader` | `./src/lib.rs:588` |
+| ✓ | 2.0 | 1 | 0.0 | `rel_paths` | `./src/lib.rs:724` |
 | ✓ | 2.0 | 2 | 100.0 | `restore_signals_and_output` | `./src/output/display.rs:41` |
 | ✓ | 2.0 | 2 | 100.0 | `PlainDisplay::run_started` | `./src/output/display.rs:252` |
 | ✓ | 2.0 | 2 | 100.0 | `PlainDisplay::step_running` | `./src/output/display.rs:263` |
@@ -129,9 +133,10 @@ The cleanup plan for the remaining flagged functions lives in
 | ✓ | 2.0 | 1 | 0.0 | `JsonDisplay::run_cancelled` | `./src/output/json.rs:132` |
 | ✓ | 2.0 | 1 | 0.0 | `JsonDisplay::handle_key` | `./src/output/json.rs:163` |
 | ✓ | 2.0 | 2 | 100.0 | `staged_paths` | `./src/git.rs:36` |
-| ✓ | 1.0 | 1 | 75.0 | `App::shutdown` | `./src/lib.rs:490` |
+| ✓ | 1.0 | 1 | 75.0 | `App::shutdown` | `./src/lib.rs:534` |
 | ✓ | 1.0 | 1 | 100.0 | `Stage::is_parallel` | `./src/pipeline/mod.rs:26` |
 | ✓ | 1.0 | 1 | 100.0 | `substitute_files` | `./src/pipeline/filter.rs:72` |
+| ✓ | 1.0 | 1 | 100.0 | `is_mutation` | `./src/watcher/mod.rs:95` |
 | ✓ | 1.0 | 1 | 100.0 | `global_path` | `./src/config/discovery.rs:37` |
 | ✓ | 1.0 | 1 | 100.0 | `default_debounce_ms` | `./src/config/schema.rs:38` |
 | ✓ | 1.0 | 1 | 100.0 | `OutputConfig::default` | `./src/config/schema.rs:53` |
@@ -170,5 +175,7 @@ The cleanup plan for the remaining flagged functions lives in
 | ✓ | 1.0 | 1 | 100.0 | `bytes_to_pathbuf` | `./src/git.rs:88` |
 | ✓ | 1.0 | 1 | 100.0 | `bytes_to_pathbuf` | `./src/git.rs:94` |
 | ✓ | 1.0 | 1 | 100.0 | `rebase_for_app` | `./src/git.rs:101` |
+| ✓ | 1.0 | 1 | 100.0 | `LoopGuard::new` | `./src/loop_guard.rs:22` |
+| ✓ | 1.0 | 1 | 100.0 | `LoopGuard::reset` | `./src/loop_guard.rs:47` |
 
-✗ 3/150 function(s) exceed CRAP threshold 30.
+✗ 4/157 function(s) exceed CRAP threshold 30.
