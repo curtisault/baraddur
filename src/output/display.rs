@@ -1874,6 +1874,87 @@ mod tests {
         assert_eq!(short_diagnostic(&r), "3 lines");
     }
 
+    /// Quiet mode + an all-passing run takes the early return: no summary is
+    /// printed and `rendered_lines` is zeroed so nothing is left on screen.
+    #[test]
+    fn run_finished_quiet_all_pass_renders_nothing() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        d.run_started(&["a".to_string(), "b".to_string()]);
+        // Pretend a previous redraw left rows on screen; the early return must
+        // reset this to 0.
+        d.rendered_lines = 5;
+
+        d.run_finished(&[
+            mk_step_result(true, Some(0), "", ""),
+            mk_step_result(true, Some(0), "", ""),
+        ]);
+
+        assert_eq!(d.rendered_lines, 0);
+        assert!(
+            d.run_summary.is_empty(),
+            "no summary should be built in the quiet early return"
+        );
+    }
+
+    /// A normal failing run builds and stashes the summary line and clears the
+    /// running flag so browse mode can take over.
+    #[test]
+    fn run_finished_failing_run_sets_summary_and_clears_running() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["s".to_string()]);
+        d.has_running = true;
+
+        d.run_finished(&[mk_step_result(false, Some(1), "boom\n", "")]);
+
+        assert!(!d.run_summary.is_empty(), "summary line should be stashed");
+        assert!(d.run_summary.contains("1 failed"));
+        assert!(!d.has_running, "has_running must be cleared at run end");
+    }
+
+    /// Empty results from a single-path file-change run surface the singular
+    /// "no steps match changed path: <path>" transient message.
+    #[test]
+    fn run_finished_no_match_message_single_path() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.set_trigger(&[PathBuf::from("src/foo.rs")]);
+        d.run_started(&[]); // moves trigger_paths → last_trigger_paths
+        d.run_finished(&[]);
+
+        assert_eq!(
+            d.transient_message.as_deref(),
+            Some("no steps match changed path: src/foo.rs")
+        );
+    }
+
+    /// Empty results from a multi-path file-change run report the count.
+    #[test]
+    fn run_finished_no_match_message_multiple_paths() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.set_trigger(&[PathBuf::from("a.rs"), PathBuf::from("b.rs")]);
+        d.run_started(&[]);
+        d.run_finished(&[]);
+
+        assert_eq!(
+            d.transient_message.as_deref(),
+            Some("no steps match 2 changed paths")
+        );
+    }
+
+    /// A trigger with an empty path list still flags the no-match case via the
+    /// fallback arm.
+    #[test]
+    fn run_finished_no_match_message_no_paths() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.set_trigger(&[]); // Some(vec![]) → last_trigger_paths is Some but empty
+        d.run_started(&[]);
+        d.run_finished(&[]);
+
+        assert_eq!(
+            d.transient_message.as_deref(),
+            Some("no steps match changed paths")
+        );
+    }
+
     #[test]
     fn help_modal_lines_has_header_columns_and_dismiss_footer() {
         use super::super::style::strip_ansi;
