@@ -1035,6 +1035,67 @@ impl TtyDisplay {
         (all_lines, cursor_top_row, cursor_row_height)
     }
 
+    /// Clamps the scroll offset so the cursor step stays inside the viewport.
+    /// Scrolls up when the cursor is above the window, down when its bottom
+    /// falls below the window, then caps so the last row never scrolls past
+    /// the end of the content. Pure — all of browse_redraw's scroll math.
+    fn clamp_scroll(
+        scroll: usize,
+        cursor_top: usize,
+        cursor_h: usize,
+        viewport: usize,
+        total_rows: usize,
+    ) -> usize {
+        let mut scroll = scroll;
+        if cursor_top < scroll {
+            scroll = cursor_top;
+        } else if cursor_top + cursor_h > scroll + viewport {
+            scroll = cursor_top + cursor_h - viewport;
+        }
+        scroll.min(total_rows.saturating_sub(viewport))
+    }
+
+    /// Selects the contiguous slice of laid-out lines to paint for a given
+    /// `scroll` (in rows) and `viewport` (in rows). Returns the index range
+    /// into `lines` plus the total rendered row count. A line that the scroll
+    /// offset would only partially skip is dropped whole — we never paint the
+    /// truncated middle of a wrapped line — and selection stops once the
+    /// viewport fills. Pure; the subtle partial-skip rule is unit-tested.
+    fn viewport_slice(
+        lines: &[(String, usize)],
+        scroll: usize,
+        viewport: usize,
+    ) -> (std::ops::Range<usize>, usize) {
+        let mut skip = scroll;
+        let mut rendered = 0usize;
+        let mut start: Option<usize> = None;
+        let mut end = lines.len();
+
+        for (i, (_, rows)) in lines.iter().enumerate() {
+            if skip > 0 {
+                if skip >= *rows {
+                    skip -= rows;
+                    continue;
+                }
+                // Partial skip: drop this whole line rather than printing a
+                // truncated middle of a wrapped line.
+                skip = 0;
+                continue;
+            }
+            if rendered >= viewport {
+                end = i;
+                break;
+            }
+            if start.is_none() {
+                start = Some(i);
+            }
+            rendered += rows;
+        }
+
+        let start = start.unwrap_or(end);
+        (start..end.max(start), rendered)
+    }
+
     /// Redraws the step list for browse mode: includes cursor highlight and
     /// inline expanded output for toggled steps. Clipped to terminal height
     /// via a scroll viewport that always keeps the cursor step visible.
@@ -1052,12 +1113,13 @@ impl TtyDisplay {
         // so the last line never hugs the very bottom.
         let viewport = term_height.saturating_sub(1);
 
-        if cursor_top_row < self.browse_scroll {
-            self.browse_scroll = cursor_top_row;
-        } else if cursor_top_row + cursor_row_height > self.browse_scroll + viewport {
-            self.browse_scroll = cursor_top_row + cursor_row_height - viewport;
-        }
-        self.browse_scroll = self.browse_scroll.min(total_rows.saturating_sub(viewport));
+        self.browse_scroll = Self::clamp_scroll(
+            self.browse_scroll,
+            cursor_top_row,
+            cursor_row_height,
+            viewport,
+            total_rows,
+        );
 
         // Force a full clear when the modal is involved (entering, leaving,
         // or while visible). The overlay paints absolute-positioned rows that
@@ -1070,25 +1132,9 @@ impl TtyDisplay {
         // ── Erase previous render, then print the viewport ───────────────
         self.prepare_redraw_region();
 
-        let mut skip = self.browse_scroll;
-        let mut rendered = 0usize;
-
-        for (text, rows) in &all_lines {
-            if skip > 0 {
-                if skip >= *rows {
-                    skip -= rows;
-                    continue;
-                }
-                // Partial skip: skip the whole line rather than printing a
-                // truncated middle of a wrapped line.
-                skip = 0;
-                continue;
-            }
-            if rendered >= viewport {
-                break;
-            }
+        let (range, rendered) = Self::viewport_slice(&all_lines, self.browse_scroll, viewport);
+        for (text, _) in &all_lines[range] {
             println!("{text}");
-            rendered += rows;
         }
 
         self.rendered_lines = rendered as u16;
@@ -1952,6 +1998,106 @@ mod tests {
         assert_eq!(
             d.transient_message.as_deref(),
             Some("no steps match changed paths")
+        );
+    }
+
+    #[test]
+    fn clamp_scroll_snaps_up_when_cursor_above_window() {
+        // Cursor at row 2 is above a scroll of 5 → snap the window up to it.
+        assert_eq!(TtyDisplay::clamp_scroll(5, 2, 1, 10, 20), 2);
+    }
+
+    #[test]
+    fn clamp_scroll_pulls_down_when_cursor_below_window() {
+        // Cursor bottom 15+2=17 exceeds window 0+10 → scroll to 17-10=7.
+        assert_eq!(TtyDisplay::clamp_scroll(0, 15, 2, 10, 20), 7);
+    }
+
+    #[test]
+    fn clamp_scroll_unchanged_when_cursor_inside_window() {
+        // Cursor at 3 sits within [2, 12); scroll stays, capped at total-viewport.
+        assert_eq!(TtyDisplay::clamp_scroll(2, 3, 1, 10, 20), 2);
+    }
+
+    #[test]
+    fn clamp_scroll_caps_to_zero_when_content_shorter_than_viewport() {
+        // total (3) < viewport (10): saturating_sub floors the cap at 0.
+        assert_eq!(TtyDisplay::clamp_scroll(5, 5, 1, 10, 3), 0);
+    }
+
+    fn rows_lines(rows: &[usize]) -> Vec<(String, usize)> {
+        rows.iter()
+            .enumerate()
+            .map(|(i, r)| (format!("line{i}"), *r))
+            .collect()
+    }
+
+    #[test]
+    fn viewport_slice_renders_everything_when_it_fits() {
+        let lines = rows_lines(&[1, 1, 1, 1, 1]);
+        let (range, rendered) = TtyDisplay::viewport_slice(&lines, 0, 10);
+        assert_eq!(range, 0..5);
+        assert_eq!(rendered, 5);
+    }
+
+    #[test]
+    fn viewport_slice_skips_whole_lines_on_clean_scroll_boundary() {
+        let lines = rows_lines(&[1, 1, 1, 1, 1]);
+        let (range, rendered) = TtyDisplay::viewport_slice(&lines, 2, 10);
+        assert_eq!(range, 2..5);
+        assert_eq!(rendered, 3);
+    }
+
+    #[test]
+    fn viewport_slice_stops_when_viewport_fills() {
+        let lines = rows_lines(&[1, 1, 1, 1, 1]);
+        let (range, rendered) = TtyDisplay::viewport_slice(&lines, 0, 2);
+        assert_eq!(range, 0..2);
+        assert_eq!(rendered, 2);
+    }
+
+    #[test]
+    fn viewport_slice_drops_a_partially_skipped_wrapped_line() {
+        // A 3-row wrapped line followed by two 1-row lines. A scroll of 2 lands
+        // inside the wrapped line — it must be dropped whole, not painted from
+        // its middle, so rendering starts at the next line.
+        let lines = rows_lines(&[3, 1, 1]);
+        let (range, rendered) = TtyDisplay::viewport_slice(&lines, 2, 10);
+        assert_eq!(range, 1..3);
+        assert_eq!(rendered, 2);
+    }
+
+    #[test]
+    fn viewport_slice_empty_lines_is_empty_range() {
+        let lines: Vec<(String, usize)> = Vec::new();
+        let (range, rendered) = TtyDisplay::viewport_slice(&lines, 0, 10);
+        assert_eq!(range, 0..0);
+        assert_eq!(rendered, 0);
+    }
+
+    /// Headless smoke test of the browse paint shell: crossterm calls are
+    /// `.ok()`'d and term size falls back to 80x24 with no tty, so the full
+    /// scroll-clamp → viewport-slice → paint path runs and sets rendered_lines.
+    /// Also exercises the help-modal overlay branch.
+    #[test]
+    fn browse_redraw_smoke_paints_headless() {
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
+        d.run_started(&["alpha".to_string(), "beta".to_string()]);
+        d.run_finished(&[mk_step_result(false, Some(1), "boom\n", "")]);
+
+        d.browse_active = true;
+        d.browse_redraw();
+        assert!(
+            d.rendered_lines > 0,
+            "browse_redraw should paint at least the step rows"
+        );
+
+        // Modal path: forces a full clear and draws the overlay.
+        d.help_modal_active = true;
+        d.browse_redraw();
+        assert!(
+            d.help_painted_last,
+            "modal paint should record help_painted_last"
         );
     }
 
