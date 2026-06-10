@@ -662,32 +662,41 @@ fn log_run_outcome(outcome: std::io::Result<PathBuf>, dc: &DisplayConfig) {
     }
 }
 
-/// Prints the always-on warning emitted when the loop guard trips, naming the
-/// paths behind the latest restart so the user can fix the offending step or
-/// add the paths to `[watch].ignore`.
-fn warn_loop(paths: &[PathBuf]) {
-    eprintln!(
-        "baraddur: restart loop detected — the pipeline restarted {LOOP_THRESHOLD} times within {}s.",
-        LOOP_WINDOW.as_secs()
-    );
-    eprintln!(
-        "baraddur: a step is likely modifying watched files (e.g. a formatter), which the watcher re-detects."
-    );
+/// Builds the always-on warning lines emitted when the loop guard trips,
+/// naming the paths behind the latest restart so the user can fix the offending
+/// step or add the paths to `[watch].ignore`. Pure (returns the lines) so the
+/// path-count branches are unit-testable; `warn_loop` just prints them.
+fn warn_loop_lines(paths: &[PathBuf]) -> Vec<String> {
+    let mut lines = vec![
+        format!(
+            "baraddur: restart loop detected — the pipeline restarted {LOOP_THRESHOLD} times within {}s.",
+            LOOP_WINDOW.as_secs()
+        ),
+        "baraddur: a step is likely modifying watched files (e.g. a formatter), which the watcher re-detects.".to_string(),
+    ];
     if paths.is_empty() {
-        eprintln!("baraddur: (no triggering paths recorded for the latest restart)");
+        lines.push("baraddur: (no triggering paths recorded for the latest restart)".to_string());
     } else {
-        eprintln!("baraddur: latest restart triggered by:");
+        lines.push("baraddur: latest restart triggered by:".to_string());
         for p in paths.iter().take(10) {
-            eprintln!("baraddur:   {}", p.display());
+            lines.push(format!("baraddur:   {}", p.display()));
         }
         if paths.len() > 10 {
-            eprintln!("baraddur:   … and {} more", paths.len() - 10);
+            lines.push(format!("baraddur:   … and {} more", paths.len() - 10));
         }
     }
-    eprintln!(
+    lines.push(format!(
         "baraddur: pausing {}s to let changes settle. add these paths to [watch].ignore or fix the step to stop this.",
         LOOP_COOLDOWN.as_secs()
-    );
+    ));
+    lines
+}
+
+/// Prints the loop-guard warning. See `warn_loop_lines` for the content.
+fn warn_loop(paths: &[PathBuf]) {
+    for line in warn_loop_lines(paths) {
+        eprintln!("{line}");
+    }
 }
 
 /// Outcome of a loop-guard `cooldown`.
@@ -917,6 +926,56 @@ mod run_until_helpers_tests {
         assert!(
             rx.try_recv().is_err(),
             "queued events should be fully drained"
+        );
+    }
+
+    #[test]
+    fn warn_loop_lines_no_paths_uses_the_none_recorded_branch() {
+        let lines = warn_loop_lines(&[]);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("no triggering paths recorded")),
+            "expected the empty-paths branch; got {lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("triggered by:")),
+            "must not print a path list when there are none"
+        );
+    }
+
+    #[test]
+    fn warn_loop_lines_lists_each_path_when_ten_or_fewer() {
+        let paths: Vec<PathBuf> = (0..3)
+            .map(|i| PathBuf::from(format!("src/f{i}.rs")))
+            .collect();
+        let lines = warn_loop_lines(&paths);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("latest restart triggered by:"))
+        );
+        for i in 0..3 {
+            assert!(
+                lines.iter().any(|l| l.ends_with(&format!("src/f{i}.rs"))),
+                "missing path f{i}; got {lines:#?}"
+            );
+        }
+        assert!(
+            !lines.iter().any(|l| l.contains("more")),
+            "no overflow line expected for ≤10 paths"
+        );
+    }
+
+    #[test]
+    fn warn_loop_lines_truncates_to_ten_with_overflow_count() {
+        let paths: Vec<PathBuf> = (0..12).map(|i| PathBuf::from(format!("f{i}.rs"))).collect();
+        let lines = warn_loop_lines(&paths);
+        let path_lines = lines.iter().filter(|l| l.contains(".rs")).count();
+        assert_eq!(path_lines, 10, "should list exactly the first 10 paths");
+        assert!(
+            lines.iter().any(|l| l.contains("… and 2 more")),
+            "expected overflow count of 2; got {lines:#?}"
         );
     }
 }

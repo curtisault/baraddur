@@ -26,12 +26,11 @@ The cleanup plan for the remaining flagged functions lives in
 | ▲ | 21.0 | 20 | 86.4 | `validate` | `./src/config/validate.rs:25` |
 | ▲ | 20.3 | 8 | 42.3 | `format_truncated_output` | `./src/output/display.rs:64` |
 | ▲ | 20.0 | 20 | 95.9 | `main` | `./src/main.rs:140` |
-| ▲ | 20.0 | 4 | 0.0 | `warn_loop` | `./src/lib.rs:668` |
 | ▲ | 19.0 | 19 | 95.7 | `parse_path_line_col` | `./src/output/diagnostic.rs:79` |
 | ▲ | 16.5 | 13 | 72.4 | `watcher_thread` | `./src/watcher/mod.rs:30` |
 | ▲ | 15.3 | 13 | 76.0 | `TtyDisplay::step_row` | `./src/output/display.rs:821` |
 | ▲ | 13.3 | 11 | 73.3 | `PlainDisplay::run_finished` | `./src/output/display.rs:302` |
-| ▲ | 12.0 | 3 | 0.0 | `exec_wrapped` | `./src/lib.rs:744` |
+| ▲ | 12.0 | 3 | 0.0 | `exec_wrapped` | `./src/lib.rs:753` |
 | ▲ | 12.0 | 3 | 0.0 | `default_editor_spawn` | `./src/output/display.rs:131` |
 | ▲ | 12.0 | 3 | 0.0 | `PlainDisplay::steps_skipped` | `./src/output/display.rs:287` |
 | ▲ | 11.2 | 8 | 63.2 | `run_parallel_stage` | `./src/pipeline/runner.rs:107` |
@@ -55,7 +54,8 @@ The cleanup plan for the remaining flagged functions lives in
 | ✓ | 7.0 | 7 | 100.0 | `load_from` | `./src/config/mod.rs:95` |
 | ✓ | 7.0 | 5 | 57.1 | `run_init` | `./src/main.rs:300` |
 | ✓ | 6.3 | 5 | 62.5 | `Cli::verbosity` | `./src/main.rs:126` |
-| ✓ | 6.0 | 2 | 0.0 | `cooldown` | `./src/lib.rs:707` |
+| ✓ | 6.0 | 2 | 0.0 | `warn_loop` | `./src/lib.rs:696` |
+| ✓ | 6.0 | 2 | 0.0 | `cooldown` | `./src/lib.rs:716` |
 | ✓ | 6.0 | 2 | 0.0 | `PlainDisplay::run_cancelled` | `./src/output/display.rs:296` |
 | ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::raw_mode_on` | `./src/output/display.rs:595` |
 | ✓ | 6.0 | 2 | 0.0 | `TtyDisplay::raw_mode_off` | `./src/output/display.rs:608` |
@@ -82,6 +82,7 @@ The cleanup plan for the remaining flagged functions lives in
 | ✓ | 4.1 | 4 | 84.2 | `repo_root` | `./src/git.rs:12` |
 | ✓ | 4.0 | 4 | 85.7 | `TtyDisplay::open_current_diagnostic` | `./src/output/display.rs:711` |
 | ✓ | 4.0 | 4 | 100.0 | `App::rerun_params` | `./src/lib.rs:532` |
+| ✓ | 4.0 | 4 | 100.0 | `warn_loop_lines` | `./src/lib.rs:669` |
 | ✓ | 4.0 | 4 | 100.0 | `format_trigger_suffix` | `./src/output/display.rs:153` |
 | ✓ | 4.0 | 4 | 100.0 | `redraw_strategy` | `./src/output/display.rs:186` |
 | ✓ | 4.0 | 4 | 100.0 | `PlainDisplay::step_finished` | `./src/output/display.rs:269` |
@@ -91,8 +92,8 @@ The cleanup plan for the remaining flagged functions lives in
 | ✓ | 3.7 | 3 | 57.1 | `App::build_display` | `./src/lib.rs:120` |
 | ✓ | 3.4 | 3 | 64.7 | `run_git` | `./src/git.rs:57` |
 | ✓ | 3.3 | 2 | 30.6 | `TtyDisplay::banner` | `./src/output/display.rs:1291` |
-| ✓ | 3.3 | 3 | 66.7 | `TtyDisplay::drop` | `./src/output/display.rs:472` |
 | ✓ | 3.3 | 3 | 68.8 | `TtyDisplay::with_terminal_released` | `./src/output/display.rs:618` |
+| ✓ | 3.1 | 3 | 77.8 | `TtyDisplay::drop` | `./src/output/display.rs:472` |
 | ✓ | 3.1 | 3 | 80.0 | `log_run_outcome` | `./src/lib.rs:658` |
 | ✓ | 3.0 | 3 | 83.3 | `TtyDisplay::visual_rows_for` | `./src/output/display.rs:548` |
 | ✓ | 3.0 | 3 | 85.7 | `await_hook` | `./src/lib.rs:561` |
@@ -145,7 +146,7 @@ The cleanup plan for the remaining flagged functions lives in
 | ✓ | 1.0 | 1 | 100.0 | `OutputConfig::default` | `./src/config/schema.rs:53` |
 | ✓ | 1.0 | 1 | 100.0 | `OnFailureConfig::default` | `./src/config/schema.rs:86` |
 | ✓ | 1.0 | 1 | 100.0 | `default_on_failure_timeout` | `./src/config/schema.rs:96` |
-| ✓ | 1.0 | 1 | 100.0 | `rel_paths` | `./src/lib.rs:734` |
+| ✓ | 1.0 | 1 | 100.0 | `rel_paths` | `./src/lib.rs:743` |
 | ✓ | 1.0 | 1 | 100.0 | `restore` | `./src/output/display.rs:51` |
 | ✓ | 1.0 | 1 | 100.0 | `timestamp` | `./src/output/display.rs:58` |
 | ✓ | 1.0 | 1 | 100.0 | `PlainDisplay::new` | `./src/output/display.rs:218` |
@@ -183,4 +184,4 @@ The cleanup plan for the remaining flagged functions lives in
 | ✓ | 1.0 | 1 | 100.0 | `LoopGuard::new` | `./src/loop_guard.rs:22` |
 | ✓ | 1.0 | 1 | 100.0 | `LoopGuard::reset` | `./src/loop_guard.rs:47` |
 
-✗ 1/162 function(s) exceed CRAP threshold 30.
+✗ 1/163 function(s) exceed CRAP threshold 30.
