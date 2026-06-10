@@ -365,16 +365,9 @@ impl App {
                     }
                 }
                 RunOutcome::FileChange(paths) => {
-                    while rx.try_recv().is_ok() {}
-                    debug_log!(dc, "file change — restarting pipeline");
-                    for p in &paths {
-                        debug_log!(dc, "  triggered by: {}", p.display());
-                    }
                     cancel_hook(&mut hook_handle, display.as_mut());
-                    let rel = rel_paths(&paths, &self.root);
                     display.run_cancelled();
-                    display.set_trigger(&rel);
-                    trigger_paths = Some(rel);
+                    trigger_paths = Some(self.on_file_change(&paths, &mut rx, display.as_mut()));
                     file_triggered = true;
                     continue;
                 }
@@ -418,14 +411,7 @@ impl App {
                             display.exit_browse_mode();
                             match maybe {
                                 Some(paths) => {
-                                    while rx.try_recv().is_ok() {}
-                                    debug_log!(dc, "file change — triggering pipeline");
-                                    for p in &paths {
-                                        debug_log!(dc, "  triggered by: {}", p.display());
-                                    }
-                                    let rel = rel_paths(&paths, &self.root);
-                                    display.set_trigger(&rel);
-                                    trigger_paths = Some(rel);
+                                    trigger_paths = Some(self.on_file_change(&paths, &mut rx, display.as_mut()));
                                     file_triggered = true;
                                     continue 'main;
                                 }
@@ -446,25 +432,15 @@ impl App {
                                         display.exit_browse_mode();
                                         return self.shutdown();
                                     }
-                                    BrowseAction::Rerun => {
+                                    action @ (BrowseAction::Rerun
+                                    | BrowseAction::RerunFailed
+                                    | BrowseAction::RerunCursor(_)) => {
                                         cancel_hook(&mut hook_handle, display.as_mut());
                                         display.exit_browse_mode();
-                                        trigger_paths = None;
-                                        rerun_filter = None;
-                                        continue 'main;
-                                    }
-                                    BrowseAction::RerunFailed => {
-                                        cancel_hook(&mut hook_handle, display.as_mut());
-                                        display.exit_browse_mode();
-                                        trigger_paths = None;
-                                        rerun_filter = last_failed_steps.clone();
-                                        continue 'main;
-                                    }
-                                    BrowseAction::RerunCursor(name) => {
-                                        cancel_hook(&mut hook_handle, display.as_mut());
-                                        display.exit_browse_mode();
-                                        trigger_paths = None;
-                                        rerun_filter = Some(vec![name]);
+                                        let (tp, rf) =
+                                            Self::rerun_params(&action, &last_failed_steps);
+                                        trigger_paths = tp;
+                                        rerun_filter = rf;
                                         continue 'main;
                                     }
                                 },
@@ -503,14 +479,7 @@ impl App {
                         cancel_hook(&mut hook_handle, display.as_mut());
                         match maybe {
                             Some(paths) => {
-                                while rx.try_recv().is_ok() {}
-                                debug_log!(dc, "file change — triggering pipeline");
-                                for p in &paths {
-                                    debug_log!(dc, "  triggered by: {}", p.display());
-                                }
-                                let rel = rel_paths(&paths, &self.root);
-                                display.set_trigger(&rel);
-                                trigger_paths = Some(rel);
+                                trigger_paths = Some(self.on_file_change(&paths, &mut rx, display.as_mut()));
                                 file_triggered = true;
                                 break 'idle; // fall through to loop top → rerun pipeline
                             }
@@ -529,6 +498,47 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Handles a file-change event shared by all three `run_until` sites (the
+    /// running-pipeline arm, the browse-idle arm, and the non-TTY idle arm):
+    /// drains any further queued events, logs the change, records the
+    /// triggering paths on the display, and returns the relative paths for the
+    /// caller to stash into `trigger_paths`. Hook cancellation and browse-mode
+    /// exit stay at the call sites since they differ per arm.
+    fn on_file_change(
+        &self,
+        paths: &[PathBuf],
+        rx: &mut tokio::sync::mpsc::Receiver<watcher::WatchEvent>,
+        display: &mut dyn Display,
+    ) -> Vec<PathBuf> {
+        while rx.try_recv().is_ok() {}
+        let dc = &self.display_config;
+        debug_log!(dc, "file change — triggering pipeline");
+        for p in paths {
+            debug_log!(dc, "  triggered by: {}", p.display());
+        }
+        let rel = rel_paths(paths, &self.root);
+        display.set_trigger(&rel);
+        rel
+    }
+
+    /// Maps a rerun browse action to the `(trigger_paths, rerun_filter)` the
+    /// next pipeline run should use. Every rerun clears `trigger_paths` (reruns
+    /// span the full file set, not the last trigger); they differ only in the
+    /// step-name filter: full rerun → none, failed → last failed set, cursor →
+    /// the single named step. Pure and unit-tested. Non-rerun actions map to
+    /// `(None, None)` but are never passed here.
+    fn rerun_params(
+        action: &BrowseAction,
+        last_failed: &Option<Vec<String>>,
+    ) -> (Option<Vec<PathBuf>>, Option<Vec<String>>) {
+        let rerun_filter = match action {
+            BrowseAction::RerunFailed => last_failed.clone(),
+            BrowseAction::RerunCursor(name) => Some(vec![name.clone()]),
+            _ => None,
+        };
+        (None, rerun_filter)
     }
 
     fn shutdown(&self) -> Result<()> {
@@ -827,5 +837,86 @@ mod apply_profile_tests {
         cfg.profiles.insert("ghost".into(), vec!["nope".into()]);
         let err = apply_profile(&mut cfg, "ghost").unwrap_err();
         assert!(err.to_string().contains("zero steps"));
+    }
+}
+
+#[cfg(test)]
+mod run_until_helpers_tests {
+    use super::*;
+    use crate::config::{Config, OnFailureConfig, OutputConfig, WatchConfig};
+    use crate::output::{PlainDisplay, Theme, Verbosity};
+
+    fn mk_app(root: PathBuf) -> App {
+        App {
+            config: Config {
+                watch: WatchConfig {
+                    extensions: vec!["rs".into()],
+                    debounce_ms: 1000,
+                    ignore: vec![],
+                },
+                output: OutputConfig::default(),
+                on_failure: OnFailureConfig::default(),
+                steps: vec![],
+                profiles: std::collections::HashMap::new(),
+            },
+            config_path: root.join(".baraddur.toml"),
+            root,
+            display_config: DisplayConfig {
+                is_tty: false,
+                no_clear: true,
+                verbosity: Verbosity::Normal,
+                format: OutputFormat::Auto,
+            },
+            profile: None,
+        }
+    }
+
+    #[test]
+    fn rerun_params_full_rerun_clears_paths_and_filter() {
+        let last = Some(vec!["a".to_string()]);
+        let (tp, rf) = App::rerun_params(&BrowseAction::Rerun, &last);
+        assert_eq!(tp, None);
+        assert_eq!(rf, None, "full rerun ignores the last-failed set");
+    }
+
+    #[test]
+    fn rerun_params_failed_uses_last_failed_set() {
+        let last = Some(vec!["check".to_string(), "test".to_string()]);
+        let (tp, rf) = App::rerun_params(&BrowseAction::RerunFailed, &last);
+        assert_eq!(tp, None);
+        assert_eq!(rf, Some(vec!["check".to_string(), "test".to_string()]));
+    }
+
+    #[test]
+    fn rerun_params_failed_with_no_prior_failures_is_none() {
+        let (tp, rf) = App::rerun_params(&BrowseAction::RerunFailed, &None);
+        assert_eq!(tp, None);
+        assert_eq!(rf, None);
+    }
+
+    #[test]
+    fn rerun_params_cursor_targets_single_named_step() {
+        let (tp, rf) = App::rerun_params(&BrowseAction::RerunCursor("clippy".into()), &None);
+        assert_eq!(tp, None);
+        assert_eq!(rf, Some(vec!["clippy".to_string()]));
+    }
+
+    #[test]
+    fn on_file_change_returns_relative_paths_and_drains_queue() {
+        let root = PathBuf::from("/proj");
+        let app = mk_app(root.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<watcher::WatchEvent>(8);
+        // A second batch queued during the run must be drained so the next
+        // pipeline uses current state, not a backlog.
+        tx.try_send(vec![root.join("other.rs")]).unwrap();
+        let mut display = PlainDisplay::new(Theme::new(false), Verbosity::Normal);
+
+        let rel = app.on_file_change(&[root.join("src/foo.rs")], &mut rx, &mut display);
+
+        assert_eq!(rel, vec![PathBuf::from("src/foo.rs")]);
+        assert!(
+            rx.try_recv().is_err(),
+            "queued events should be fully drained"
+        );
     }
 }
