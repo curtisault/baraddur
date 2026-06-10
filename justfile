@@ -33,7 +33,7 @@ fmt:
 fmt-check:
     cargo fmt --check
 
-ci: fmt-check lint crap
+ci: fmt-check lint crap crap-gate
 
 # Regenerate docs/crap-and-code-cov.md from current coverage + complexity.
 # Requires `cargo-llvm-cov` and `cargo-crap` to be installed locally. Wired
@@ -43,6 +43,18 @@ ci: fmt-check lint crap
 crap:
     cargo llvm-cov --lcov --output-path lcov.info
     ./scripts/crap.sh
+
+# Regression gate: fail CI if any function's CRAP score climbs past the locked
+# ceiling. The doc report (recipe `crap`) flags everything over 30; this gate
+# only fails the build on a regression past the current worst score so the bar
+# can't silently creep up. Reuses the lcov.info that `crap` just generated.
+#
+# CRAP_CEILING is set just above the current worst offender (`App::run_until`,
+# ~58 — its TTY browse block isn't headless-testable; see
+# docs/plans/crap-cleanup.md). Ratchet it DOWN as scores improve, never up.
+CRAP_CEILING := "60"
+crap-gate:
+    cargo-crap --lcov lcov.info --threshold {{CRAP_CEILING}} --fail-above --exclude 'tests/**' --summary
 
 # Audit GitHub Action SHA pins against current upstream.
 check-pins:

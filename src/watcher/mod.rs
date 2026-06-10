@@ -72,18 +72,24 @@ fn watcher_thread(cfg: WatchConfig, tx: mpsc::Sender<WatchEvent>) {
         };
 
         match received {
-            Ok(Ok(event)) => {
-                if !is_mutation(&event.kind) {
-                    continue;
-                }
-                for path in event.paths {
-                    if matches_filters(&path, &cfg) && !pending.contains(&path) {
-                        pending.push(path);
-                    }
-                }
-            }
+            Ok(Ok(event)) => accumulate_paths(&mut pending, &event, &cfg),
             Ok(Err(e)) => eprintln!("baraddur: watch error: {e}"),
             Err(_) => return, // watcher dropped / channel closed
+        }
+    }
+}
+
+/// Folds one watcher event's paths into the `pending` batch: drops non-mutation
+/// (read/open) events entirely, then appends each path that matches the watch
+/// filters and isn't already queued. The pure, testable core of the watcher
+/// loop's accumulation step — keeps `watcher_thread` to channel plumbing.
+fn accumulate_paths(pending: &mut Vec<PathBuf>, event: &notify::Event, cfg: &WatchConfig) {
+    if !is_mutation(&event.kind) {
+        return;
+    }
+    for path in &event.paths {
+        if matches_filters(path, cfg) && !pending.contains(path) {
+            pending.push(path.clone());
         }
     }
 }
@@ -234,5 +240,62 @@ mod tests {
         assert!(is_mutation(&EventKind::Remove(RemoveKind::File)));
         // Fallback/polling backends report `Any`; keep triggering on those.
         assert!(is_mutation(&EventKind::Any));
+    }
+
+    fn modify_event(paths: &[&str]) -> notify::Event {
+        use notify::event::{DataChange, ModifyKind};
+        let mut ev = notify::Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)));
+        for p in paths {
+            ev = ev.add_path(PathBuf::from(p));
+        }
+        ev
+    }
+
+    #[test]
+    fn accumulate_appends_matching_paths() {
+        let mut pending = Vec::new();
+        accumulate_paths(
+            &mut pending,
+            &modify_event(&["src/a.rs"]),
+            &cfg(&["rs"], &[]),
+        );
+        assert_eq!(pending, vec![PathBuf::from("src/a.rs")]);
+    }
+
+    #[test]
+    fn accumulate_dedupes_against_pending() {
+        let mut pending = vec![PathBuf::from("src/a.rs")];
+        // Same path arriving again — and twice within one event — stays unique.
+        accumulate_paths(
+            &mut pending,
+            &modify_event(&["src/a.rs", "src/a.rs"]),
+            &cfg(&["rs"], &[]),
+        );
+        assert_eq!(pending, vec![PathBuf::from("src/a.rs")]);
+    }
+
+    #[test]
+    fn accumulate_skips_non_mutation_events() {
+        use notify::event::{AccessKind, AccessMode};
+        let mut pending = Vec::new();
+        let mut ev = notify::Event::new(EventKind::Access(AccessKind::Open(AccessMode::Any)));
+        ev = ev.add_path(PathBuf::from("src/a.rs"));
+        accumulate_paths(&mut pending, &ev, &cfg(&["rs"], &[]));
+        assert!(
+            pending.is_empty(),
+            "read/open events must not enqueue paths"
+        );
+    }
+
+    #[test]
+    fn accumulate_drops_filtered_paths() {
+        let mut pending = Vec::new();
+        // Wrong extension and an ignored dir are both excluded; the .rs survives.
+        accumulate_paths(
+            &mut pending,
+            &modify_event(&["README.md", "target/x.rs", "src/a.rs"]),
+            &cfg(&["rs"], &["target"]),
+        );
+        assert_eq!(pending, vec![PathBuf::from("src/a.rs")]);
     }
 }

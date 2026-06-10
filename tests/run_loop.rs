@@ -4,8 +4,8 @@
 //! Uses `run_until` instead of `run` so the test can inject a shutdown future
 //! without sending SIGINT to the test runner.
 
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use baraddur::App;
@@ -247,6 +247,120 @@ async fn run_once_with_staged_paths_filters_step_subset() {
     assert!(
         !log.contains("docs"),
         "expected `docs` step to be filtered out; log:\n{log}"
+    );
+}
+
+/// Polls `path`'s byte length until it reaches `min` or `budget` elapses,
+/// returning the last observed length. Lets watcher-driven tests wait on an
+/// observable side effect (one byte appended per pipeline run) instead of
+/// racing a fixed sleep against non-deterministic OS file-event latency.
+async fn wait_for_len(path: &Path, min: usize, budget: Duration) -> usize {
+    let deadline = Instant::now() + budget;
+    loop {
+        let len = std::fs::read(path).map(|b| b.len()).unwrap_or(0);
+        if len >= min || Instant::now() >= deadline {
+            return len;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Repeatedly rewrites `trigger` (a watched file) until `runs` reaches `target`
+/// bytes or `budget` elapses, returning the last observed `runs` length. A
+/// single write can be missed if it lands before the OS watcher's recursive
+/// watch is fully established, so re-poking is the reliable way to drive a
+/// file-change rerun without a flaky fixed-delay assumption.
+async fn poke_until(trigger: &Path, runs: &Path, target: usize, budget: Duration) -> usize {
+    let deadline = Instant::now() + budget;
+    let mut n = 0u32;
+    loop {
+        let len = std::fs::read(runs).map(|b| b.len()).unwrap_or(0);
+        if len >= target || Instant::now() >= deadline {
+            return len;
+        }
+        n += 1;
+        // Changing content guarantees a Modify event each poke.
+        let _ = std::fs::write(trigger, format!("fn x{n}() {{}}\n"));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
+/// A file change while the loop is idle (non-TTY) must cancel the wait and
+/// rerun the pipeline. Drives the `'idle` → `rx.recv` → `on_file_change` →
+/// `break 'idle` → loop-top rerun path. The step appends one byte per run to
+/// `runs.txt`; observing ≥2 bytes proves the second run fired. Uses a oneshot
+/// stop fired only after the rerun is observed, so the test never races the
+/// watcher's delivery latency.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_until_reruns_on_file_change_while_idle() {
+    let td = TempDir::new().unwrap();
+    let root = td.path().to_path_buf();
+    // `runs.txt` is `.txt`, not a watched `.rs`, so it never self-triggers.
+    let app = trivial_app(&td, "sh -c 'printf x >> runs.txt'");
+
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let stop = async {
+        let _ = stop_rx.await;
+    };
+    let runs = root.join("runs.txt");
+    let handle = tokio::spawn(async move { app.run_until(stop).await });
+
+    // Wait for the initial run to land its byte, then poke a watched file
+    // until the rerun lands its byte. Stop the loop once observed.
+    wait_for_len(&runs, 1, Duration::from_secs(5)).await;
+    let len = poke_until(&root.join("trigger.rs"), &runs, 2, Duration::from_secs(8)).await;
+    let _ = stop_tx.send(());
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("run_until did not return within 5s")
+        .expect("run_until task panicked")
+        .expect("run_until returned an error");
+
+    assert!(
+        len >= 2,
+        "expected ≥2 pipeline runs after a file-change rerun; runs.txt len = {len}"
+    );
+}
+
+/// A file change arriving while an `on_failure` hook is still in flight must
+/// cancel the hook and rerun. Drives the idle-arm `cancel_hook` path: a
+/// failing step spawns a slow hook, then a watched-file write cancels it and
+/// restarts the pipeline. The step both records the run and fails, so we can
+/// confirm the rerun happened despite the live hook.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_change_cancels_in_flight_hook_and_reruns() {
+    let td = TempDir::new().unwrap();
+    let root = td.path().to_path_buf();
+    // Append a byte, then fail — so the run both counts and triggers the hook.
+    let mut app = trivial_app(&td, "sh -c 'printf x >> runs.txt; false'");
+    app.config.on_failure = OnFailureConfig {
+        enabled: true,
+        cmd: "sleep 5".into(), // long enough to still be running at file-change
+        prompt: String::new(),
+        timeout_secs: 30,
+    };
+
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let stop = async {
+        let _ = stop_rx.await;
+    };
+    let runs = root.join("runs.txt");
+    let handle = tokio::spawn(async move { app.run_until(stop).await });
+
+    // First run fails and spawns the (slow) hook; wait for its byte, then poke
+    // a watched file to cancel the in-flight hook and rerun.
+    wait_for_len(&runs, 1, Duration::from_secs(5)).await;
+    let len = poke_until(&root.join("trigger.rs"), &runs, 2, Duration::from_secs(8)).await;
+    let _ = stop_tx.send(());
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("run_until did not return within 5s")
+        .expect("run_until task panicked")
+        .expect("run_until returned an error");
+
+    assert!(
+        len >= 2,
+        "expected a rerun after the in-flight hook was cancelled; runs.txt len = {len}"
     );
 }
 
