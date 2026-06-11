@@ -400,6 +400,10 @@ pub struct TtyDisplay {
     // ── Browse mode state ────────────────────────────────────────────────────
     /// Pre-formatted output per step, captured in `run_finished`.
     step_outputs: Vec<String>,
+    /// Raw (untruncated) combined stdout+stderr per step, captured in
+    /// `run_finished`. Backs the `y`/`Y` clipboard-copy keys so the user yanks
+    /// the full error rather than the head/tail-truncated display form.
+    step_raw_outputs: Vec<String>,
     /// Whether each step's output is shown inline in browse mode.
     expanded: Vec<bool>,
     /// Tracks the `O` toggle: true when all steps are expanded.
@@ -461,12 +465,65 @@ pub struct TtyDisplay {
     /// Used to force a `FullClear` on the next paint so overlay rows above
     /// the main content's tracked `rendered_lines` are erased properly.
     help_painted_last: bool,
+    /// Clipboard sink. Default emits OSC 52 to stdout; tests swap it to record
+    /// the copied text. See `ClipboardWriter` / `default_clipboard_writer`.
+    clipboard_writer: ClipboardWriter,
 }
 
 /// `(file, line, col?)` → spawn-and-wait outcome. Returns `Ok(())` when the
 /// editor was launched (even if the user quit it non-zero); `Err` only when
 /// we couldn't start it at all.
 type EditorSpawn = Box<dyn Fn(&Path, u32, Option<u32>) -> std::io::Result<()> + Send + Sync>;
+
+/// Sink for clipboard payloads. Injectable so tests can capture the text that
+/// would be copied without emitting terminal escape sequences. The default
+/// (`default_clipboard_writer`) wraps the text in OSC 52 and writes to stdout.
+type ClipboardWriter = Box<dyn Fn(&str) + Send + Sync>;
+
+/// Standard base64 (RFC 4648) encoder with padding. Used to wrap clipboard
+/// payloads for OSC 52. No external crate is pulled in for this — the alphabet
+/// and 3→4 byte expansion are trivial, and we only ever encode a single step's
+/// captured output (already capped at 100 KiB by the runner).
+fn base64_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[((n >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(n & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Wraps `text` in an OSC 52 clipboard-set escape sequence. Terminals that
+/// support OSC 52 (kitty, WezTerm, iTerm2, foot, tmux with `set-clipboard on`,
+/// …) copy the decoded payload into the system clipboard. Because the sequence
+/// travels in-band, this works over SSH where a native clipboard API cannot.
+/// `c` selects the clipboard (as opposed to the primary selection).
+fn osc52_sequence(text: &str) -> String {
+    format!("\x1b]52;c;{}\x07", base64_encode(text.as_bytes()))
+}
+
+/// Default `ClipboardWriter`: emit an OSC 52 sequence to stdout and flush.
+fn default_clipboard_writer(text: &str) {
+    let seq = osc52_sequence(text);
+    let mut out = std::io::stdout();
+    let _ = out.write_all(seq.as_bytes());
+    let _ = out.flush();
+}
 
 impl Drop for TtyDisplay {
     fn drop(&mut self) {
@@ -506,6 +563,7 @@ impl TtyDisplay {
             #[cfg(unix)]
             original_termios,
             step_outputs: Vec::new(),
+            step_raw_outputs: Vec::new(),
             expanded: Vec::new(),
             all_expanded: false,
             cursor: 0,
@@ -528,6 +586,7 @@ impl TtyDisplay {
             editor_spawn: Box::new(default_editor_spawn),
             help_modal_active: false,
             help_painted_last: false,
+            clipboard_writer: Box::new(default_clipboard_writer),
         }
     }
 
@@ -535,6 +594,46 @@ impl TtyDisplay {
     /// `(path, line, col)` triple without actually launching an editor.
     pub fn set_editor_spawn(&mut self, f: EditorSpawn) {
         self.editor_spawn = f;
+    }
+
+    /// Replaces the default clipboard sink. Tests use this to capture the text
+    /// that would be copied without emitting OSC 52 escape sequences.
+    pub fn set_clipboard_writer(&mut self, f: ClipboardWriter) {
+        self.clipboard_writer = f;
+    }
+
+    /// Raw (untruncated) combined output of the step under the cursor, or
+    /// `None` when that step produced no captured output.
+    fn clipboard_text_for_cursor(&self) -> Option<String> {
+        self.step_raw_outputs
+            .get(self.cursor)
+            .filter(|s| !s.is_empty())
+            .cloned()
+    }
+
+    /// Combined raw output of every failed step, each under a `=== name ===`
+    /// header. `None` when no step failed.
+    fn clipboard_text_for_failed(&self) -> Option<String> {
+        let mut out = String::new();
+        for (i, status) in self.statuses.iter().enumerate() {
+            if !matches!(status, StepStatus::Failed(..)) {
+                continue;
+            }
+            let body = self
+                .step_raw_outputs
+                .get(i)
+                .map(String::as_str)
+                .unwrap_or("");
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&format!("=== {} ===\n", self.step_names[i]));
+            out.push_str(body);
+            if !body.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+        if out.is_empty() { None } else { Some(out) }
     }
 
     fn term_width() -> usize {
@@ -650,6 +749,10 @@ impl TtyDisplay {
             ("  Enter / o  toggle", "  r   pipeline"),
             ("  O          expand", "  f   failed steps"),
             ("", "  c   step under cursor"),
+            ("", ""),
+            ("Clipboard", ""),
+            ("  y   copy step output", ""),
+            ("  Y   copy all failures", ""),
         ];
 
         let col_width = 26usize;
@@ -980,7 +1083,7 @@ impl TtyDisplay {
 
         // Grouped, symbol-led, fits ~80 cols. Stays visible even when the
         // `?` modal is open — the modal floats on top as an overlay.
-        let help = "  ↕ j/k   ⏎ toggle   ▸ n/p/e   ↺ r/f/c   ? help · q quit";
+        let help = "  ↕ j/k   ⏎ toggle   ▸ n/p/e   ↺ r/f/c   ⎘ y/Y   ? help · q quit";
         let help_styled = format!("{}", self.theme.dim(help));
         let r = Self::visual_rows_for(&help_styled, width) as usize;
         out.push((help_styled, r));
@@ -1242,6 +1345,7 @@ impl TtyDisplay {
                     format!("{}\n{}", r.stdout, r.stderr)
                 };
                 self.parsed_diagnostics[idx] = crate::output::diagnostic::parse(&combined);
+                self.step_raw_outputs[idx] = combined;
                 self.current_diagnostic[idx] = 0;
             }
         }
@@ -1350,6 +1454,7 @@ impl Display for TtyDisplay {
         self.has_running = false;
         // Reset browse state for the new run.
         self.step_outputs = vec![String::new(); step_names.len()];
+        self.step_raw_outputs = vec![String::new(); step_names.len()];
         self.expanded = vec![false; step_names.len()];
         self.all_expanded = false;
         self.cursor = 0;
@@ -1641,6 +1746,26 @@ impl Display for TtyDisplay {
             KeyCode::Char('e') => {
                 self.last_key = None;
                 self.open_current_diagnostic();
+                BrowseAction::Redraw
+            }
+            KeyCode::Char('y') => {
+                self.last_key = None;
+                if let Some(text) = self.clipboard_text_for_cursor() {
+                    (self.clipboard_writer)(&text);
+                    self.transient_message = Some("copied step output to clipboard".into());
+                } else {
+                    self.transient_message = Some("no output to copy".into());
+                }
+                BrowseAction::Redraw
+            }
+            KeyCode::Char('Y') => {
+                self.last_key = None;
+                if let Some(text) = self.clipboard_text_for_failed() {
+                    (self.clipboard_writer)(&text);
+                    self.transient_message = Some("copied all failed output to clipboard".into());
+                } else {
+                    self.transient_message = Some("no failures to copy".into());
+                }
                 BrowseAction::Redraw
             }
             KeyCode::Char('?') => {
@@ -2108,8 +2233,8 @@ mod tests {
         let d = TtyDisplay::new(Theme::new(false), Verbosity::Normal, true);
         let lines = d.help_modal_lines();
 
-        // 1 header + 1 blank + 10 rows + 1 blank + 1 footer = 14 lines.
-        assert_eq!(lines.len(), 14, "unexpected line count: {lines:#?}");
+        // 1 header + 1 blank + 14 rows + 1 blank + 1 footer = 18 lines.
+        assert_eq!(lines.len(), 18, "unexpected line count: {lines:#?}");
 
         let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
         assert_eq!(plain[0].trim(), "Help");
@@ -2124,6 +2249,14 @@ mod tests {
                 .iter()
                 .any(|l| l.contains("Output") && l.contains("Rerun")),
             "expected a row pairing Output / Rerun"
+        );
+        assert!(
+            plain.iter().any(|l| l.trim() == "Clipboard"),
+            "expected a Clipboard section header"
+        );
+        assert!(
+            plain.iter().any(|l| l.contains("y   copy step output")),
+            "expected the y clipboard row"
         );
         assert!(plain.last().unwrap().contains("press any key to dismiss"));
     }
@@ -2885,5 +3018,140 @@ mod tests {
             after.local_modes.contains(LocalModes::ISIG),
             "ISIG should be re-enabled"
         );
+    }
+
+    // ── Clipboard (OSC 52) ───────────────────────────────────────────────────
+
+    #[test]
+    fn base64_encode_known_vectors() {
+        // RFC 4648 §10 test vectors.
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn osc52_sequence_wraps_base64_payload() {
+        let seq = osc52_sequence("foobar");
+        assert_eq!(seq, "\x1b]52;c;Zm9vYmFy\x07");
+    }
+
+    fn named_result(name: &str, success: bool, stdout: &str, stderr: &str) -> StepResult {
+        StepResult {
+            name: name.into(),
+            success,
+            exit_code: Some(if success { 0 } else { 1 }),
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            duration: Duration::from_secs(0),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }
+    }
+
+    /// `y` copies the raw output of the step under the cursor and confirms via
+    /// the transient message. The captured text is the untruncated combined
+    /// stdout+stderr, not the `  `-indented display form.
+    #[test]
+    fn handle_key_y_copies_cursor_step_raw_output() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::sync::{Arc, Mutex};
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = captured.clone();
+        d.set_clipboard_writer(Box::new(move |t| sink.lock().unwrap().push(t.to_string())));
+
+        d.run_started(&["alpha".to_string(), "beta".to_string()]);
+        d.run_finished(&[
+            named_result("alpha", true, "all good\n", ""),
+            named_result("beta", false, "", "error: boom\n"),
+        ]);
+        // run_finished parks the cursor on the first failure (beta).
+        d.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+        let got = captured.lock().unwrap();
+        assert_eq!(got.as_slice(), ["error: boom\n"]);
+        assert_eq!(
+            d.transient_message.as_deref(),
+            Some("copied step output to clipboard")
+        );
+    }
+
+    /// `y` over a step with no captured output copies nothing and says so.
+    #[test]
+    fn handle_key_y_reports_when_no_output() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::sync::{Arc, Mutex};
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = captured.clone();
+        d.set_clipboard_writer(Box::new(move |t| sink.lock().unwrap().push(t.to_string())));
+
+        d.run_started(&["alpha".to_string()]);
+        d.run_finished(&[named_result("alpha", true, "", "")]);
+        d.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "nothing should be copied"
+        );
+        assert_eq!(d.transient_message.as_deref(), Some("no output to copy"));
+    }
+
+    /// `Y` copies every failed step's output, each under a `=== name ===`
+    /// header, and skips passing steps.
+    #[test]
+    fn handle_key_shift_y_copies_all_failed_output() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::sync::{Arc, Mutex};
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = captured.clone();
+        d.set_clipboard_writer(Box::new(move |t| sink.lock().unwrap().push(t.to_string())));
+
+        let results = [
+            named_result("a", false, "boom a\n", ""),
+            named_result("b", true, "fine\n", ""),
+            named_result("c", false, "", "boom c\n"),
+        ];
+        d.run_started(&["a".to_string(), "b".to_string(), "c".to_string()]);
+        // step_finished drives the per-step statuses that `Y` reads.
+        for r in &results {
+            d.step_finished(r);
+        }
+        d.run_finished(&results);
+        d.handle_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT));
+
+        let got = captured.lock().unwrap();
+        assert_eq!(got.len(), 1);
+        let text = &got[0];
+        assert_eq!(text, "=== a ===\nboom a\n\n=== c ===\nboom c\n");
+        assert!(!text.contains("fine"), "passing step must be excluded");
+    }
+
+    /// `Y` with no failed steps copies nothing and reports it.
+    #[test]
+    fn handle_key_shift_y_reports_when_no_failures() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::sync::{Arc, Mutex};
+
+        let mut d = TtyDisplay::new(Theme::new(false), Verbosity::Quiet, true);
+        let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = captured.clone();
+        d.set_clipboard_writer(Box::new(move |t| sink.lock().unwrap().push(t.to_string())));
+
+        d.run_started(&["a".to_string()]);
+        d.run_finished(&[named_result("a", true, "fine\n", "")]);
+        d.handle_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT));
+
+        assert!(captured.lock().unwrap().is_empty());
+        assert_eq!(d.transient_message.as_deref(), Some("no failures to copy"));
     }
 }
