@@ -1,5 +1,33 @@
 default: test
 
+# Idempotent: rustup components no-op if present, cargo-installed binaries are
+# skipped when already on PATH, and `jq` (a system package used by json-steps/
+# json-watch) only triggers a warning since cargo can't install it.
+# Install every external tool the other recipes need (run once after cloning).
+setup:
+    @echo "▸ rustup components (rustfmt, clippy, llvm-tools-preview)"
+    rustup component add rustfmt clippy llvm-tools-preview
+    @echo "▸ cargo-llvm-cov (coverage → lcov.info for the crap recipe)"
+    @cargo llvm-cov --version >/dev/null 2>&1 || cargo install --locked cargo-llvm-cov
+    @echo "▸ cargo-crap (CRAP complexity gate)"
+    @command -v cargo-crap >/dev/null 2>&1 || cargo install --locked cargo-crap
+    @command -v jq >/dev/null 2>&1 || echo "⚠ jq not found — needed for json-steps/json-watch; install it via your system package manager"
+    @echo "✓ setup complete — try 'just ci'"
+
+# Lists any missing tool and exits non-zero without installing anything, so it
+# can gate CI or a pre-flight check ('just setup' installs what's missing).
+# Read-only check that every dev tool is present.
+setup-check:
+    @missing=0; \
+    for c in rustfmt clippy; do \
+        rustup component list --installed 2>/dev/null | grep -q "^$c" || { echo "✗ rustup component '$c' missing"; missing=1; }; \
+    done; \
+    rustup component list --installed 2>/dev/null | grep -q "^llvm-tools" || { echo "✗ rustup component 'llvm-tools-preview' missing"; missing=1; }; \
+    cargo llvm-cov --version >/dev/null 2>&1 || { echo "✗ cargo-llvm-cov missing"; missing=1; }; \
+    command -v cargo-crap >/dev/null 2>&1 || { echo "✗ cargo-crap missing"; missing=1; }; \
+    command -v jq >/dev/null 2>&1 || { echo "✗ jq missing"; missing=1; }; \
+    if [ "$missing" -eq 0 ]; then echo "✓ all dev tools present"; else echo "→ run 'just setup' to install the missing tools"; exit 1; fi
+
 build:
     cargo build
 
