@@ -517,12 +517,87 @@ fn osc52_sequence(text: &str) -> String {
     format!("\x1b]52;c;{}\x07", base64_encode(text.as_bytes()))
 }
 
-/// Default `ClipboardWriter`: emit an OSC 52 sequence to stdout and flush.
+/// Default `ClipboardWriter`. Prefers a native clipboard CLI (`wl-copy`,
+/// `xclip`, `xsel`, `pbcopy`) because those write the real system clipboard and
+/// — crucially — bypass terminal multiplexers like tmux, which otherwise
+/// swallow OSC 52. Falls back to an in-band OSC 52 sequence when no native tool
+/// is available (the remote/SSH case, where shelling out can't reach the
+/// user's clipboard but the escape sequence can travel back over the wire).
 fn default_clipboard_writer(text: &str) {
+    if copy_via_native_tool(text) {
+        return;
+    }
     let seq = osc52_sequence(text);
     let mut out = std::io::stdout();
     let _ = out.write_all(seq.as_bytes());
     let _ = out.flush();
+}
+
+/// Clipboard CLIs to try, in priority order, filtered to those whose display
+/// server (or platform) is actually present. Reads the real environment, then
+/// defers to `clipboard_candidates_for` (pure, unit-tested) for the selection.
+fn native_clipboard_candidates() -> Vec<(&'static str, &'static [&'static str])> {
+    clipboard_candidates_for(
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        std::env::var_os("DISPLAY").is_some(),
+        cfg!(target_os = "macos"),
+    )
+}
+
+/// Pure selection logic for `native_clipboard_candidates`. Wayland is listed
+/// first since it's the common modern Linux desktop, then X11, then macOS.
+fn clipboard_candidates_for(
+    has_wayland: bool,
+    has_x11: bool,
+    is_macos: bool,
+) -> Vec<(&'static str, &'static [&'static str])> {
+    let mut out: Vec<(&str, &[&str])> = Vec::new();
+    if has_wayland {
+        out.push(("wl-copy", &[]));
+    }
+    if has_x11 {
+        out.push(("xclip", &["-selection", "clipboard"]));
+        out.push(("xsel", &["--clipboard", "--input"]));
+    }
+    if is_macos {
+        out.push(("pbcopy", &[]));
+    }
+    out
+}
+
+/// Tries each candidate clipboard CLI until one accepts the text. Returns true
+/// on the first success, false if none are installed or all fail.
+fn copy_via_native_tool(text: &str) -> bool {
+    native_clipboard_candidates()
+        .into_iter()
+        .any(|(program, args)| pipe_to_command(program, args, text))
+}
+
+/// Spawns `program args`, writes `text` to its stdin, and waits. Returns true
+/// only when the process started and exited successfully. Errors (missing
+/// binary, write failure, non-zero exit) are swallowed so the caller can fall
+/// through to the next candidate or to OSC 52.
+fn pipe_to_command(program: &str, args: &[&str], text: &str) -> bool {
+    use std::process::{Command, Stdio};
+    let Ok(mut child) = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    // Scoped so stdin is dropped (closed → EOF) before we wait, otherwise tools
+    // like xclip block forever waiting for more input.
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(text.as_bytes()).is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+    }
+    matches!(child.wait(), Ok(status) if status.success())
 }
 
 impl Drop for TtyDisplay {
@@ -3038,6 +3113,35 @@ mod tests {
     fn osc52_sequence_wraps_base64_payload() {
         let seq = osc52_sequence("foobar");
         assert_eq!(seq, "\x1b]52;c;Zm9vYmFy\x07");
+    }
+
+    #[test]
+    fn clipboard_candidates_prefer_wayland_then_x11_then_macos() {
+        // Wayland desktop: wl-copy leads, X11 tools follow as a fallback for
+        // XWayland setups.
+        let names: Vec<_> = clipboard_candidates_for(true, true, false)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(names, ["wl-copy", "xclip", "xsel"]);
+
+        // Pure X11.
+        let names: Vec<_> = clipboard_candidates_for(false, true, false)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(names, ["xclip", "xsel"]);
+
+        // Headless / no display server, non-macOS → nothing native; the writer
+        // falls through to OSC 52.
+        assert!(clipboard_candidates_for(false, false, false).is_empty());
+
+        // macOS always has pbcopy regardless of display server.
+        let names: Vec<_> = clipboard_candidates_for(false, false, true)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(names, ["pbcopy"]);
     }
 
     fn named_result(name: &str, success: bool, stdout: &str, stderr: &str) -> StepResult {
