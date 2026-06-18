@@ -465,8 +465,9 @@ pub struct TtyDisplay {
     /// Used to force a `FullClear` on the next paint so overlay rows above
     /// the main content's tracked `rendered_lines` are erased properly.
     help_painted_last: bool,
-    /// Clipboard sink. Default emits OSC 52 to stdout; tests swap it to record
-    /// the copied text. See `ClipboardWriter` / `default_clipboard_writer`.
+    /// Clipboard sink. Default copies via the platform's native clipboard tool
+    /// (falling back to OSC 52); tests swap it to record the copied text. See
+    /// `ClipboardWriter` / `default_clipboard_writer`.
     clipboard_writer: ClipboardWriter,
 }
 
@@ -476,8 +477,9 @@ pub struct TtyDisplay {
 type EditorSpawn = Box<dyn Fn(&Path, u32, Option<u32>) -> std::io::Result<()> + Send + Sync>;
 
 /// Sink for clipboard payloads. Injectable so tests can capture the text that
-/// would be copied without emitting terminal escape sequences. The default
-/// (`default_clipboard_writer`) wraps the text in OSC 52 and writes to stdout.
+/// would be copied without touching the real clipboard. The default
+/// (`default_clipboard_writer`) copies via the platform's native clipboard tool
+/// and falls back to OSC 52.
 type ClipboardWriter = Box<dyn Fn(&str) + Send + Sync>;
 
 /// Standard base64 (RFC 4648) encoder with padding. Used to wrap clipboard
@@ -517,87 +519,75 @@ fn osc52_sequence(text: &str) -> String {
     format!("\x1b]52;c;{}\x07", base64_encode(text.as_bytes()))
 }
 
-/// Default `ClipboardWriter`. Prefers a native clipboard CLI (`wl-copy`,
-/// `xclip`, `xsel`, `pbcopy`) because those write the real system clipboard and
-/// — crucially — bypass terminal multiplexers like tmux, which otherwise
-/// swallow OSC 52. Falls back to an in-band OSC 52 sequence when no native tool
-/// is available (the remote/SSH case, where shelling out can't reach the
-/// user's clipboard but the escape sequence can travel back over the wire).
+/// Spawns `program args`, writes `text` to its stdin, and waits. Returns `true`
+/// only when the child started, accepted the full payload, and exited zero —
+/// i.e. the clipboard was overwritten. Any failure (tool absent, no display,
+/// non-zero exit) yields `false` so the caller can try the next candidate.
+fn try_clipboard_command(program: &str, args: &[&str], text: &str) -> bool {
+    use std::process::{Command, Stdio};
+    let mut child = match Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(text.as_bytes()).is_err() {
+            // Reap the child to avoid a zombie before bailing out.
+            let _ = child.wait();
+            return false;
+        }
+        // Dropping `stdin` here closes the pipe so the tool sees EOF.
+    }
+    matches!(child.wait(), Ok(status) if status.success())
+}
+
+/// Copies `text` to the system clipboard via the platform's native clipboard
+/// utility, returning `true` on success. Unlike OSC 52 — which depends on the
+/// terminal emulator decoding the escape sequence (unsupported by macOS
+/// Terminal.app, gated behind a preference in iTerm2, and behind
+/// `set-clipboard on` in tmux) — shelling out to the OS clipboard tool reliably
+/// *overwrites* the clipboard on a local machine.
+///
+/// Candidates are tried in order; the first that spawns, accepts the payload on
+/// stdin, and exits zero wins. Returns `false` when no tool is available or all
+/// fail (e.g. a headless SSH host with no display), so the caller falls back to
+/// OSC 52, which can ferry the payload back through the terminal.
+fn native_clipboard_copy(text: &str) -> bool {
+    // (program, args) pairs, most-preferred first, per platform.
+    #[cfg(target_os = "macos")]
+    let candidates: &[(&str, &[&str])] = &[("pbcopy", &[])];
+    #[cfg(target_os = "windows")]
+    let candidates: &[(&str, &[&str])] = &[("clip", &[])];
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let candidates: &[(&str, &[&str])] = &[
+        ("wl-copy", &[]),
+        ("xclip", &["-selection", "clipboard"]),
+        ("xsel", &["--clipboard", "--input"]),
+    ];
+
+    candidates
+        .iter()
+        .any(|(program, args)| try_clipboard_command(program, args, text))
+}
+
+/// Default `ClipboardWriter`: copy `text` to the system clipboard. Prefers the
+/// platform's native clipboard tool (which reliably overwrites the clipboard on
+/// every supported OS); only when none is available — e.g. over SSH — falls
+/// back to emitting an OSC 52 sequence the terminal can carry to the local
+/// clipboard.
 fn default_clipboard_writer(text: &str) {
-    if copy_via_native_tool(text) {
+    if native_clipboard_copy(text) {
         return;
     }
     let seq = osc52_sequence(text);
     let mut out = std::io::stdout();
     let _ = out.write_all(seq.as_bytes());
     let _ = out.flush();
-}
-
-/// Clipboard CLIs to try, in priority order, filtered to those whose display
-/// server (or platform) is actually present. Reads the real environment, then
-/// defers to `clipboard_candidates_for` (pure, unit-tested) for the selection.
-fn native_clipboard_candidates() -> Vec<(&'static str, &'static [&'static str])> {
-    clipboard_candidates_for(
-        std::env::var_os("WAYLAND_DISPLAY").is_some(),
-        std::env::var_os("DISPLAY").is_some(),
-        cfg!(target_os = "macos"),
-    )
-}
-
-/// Pure selection logic for `native_clipboard_candidates`. Wayland is listed
-/// first since it's the common modern Linux desktop, then X11, then macOS.
-fn clipboard_candidates_for(
-    has_wayland: bool,
-    has_x11: bool,
-    is_macos: bool,
-) -> Vec<(&'static str, &'static [&'static str])> {
-    let mut out: Vec<(&str, &[&str])> = Vec::new();
-    if has_wayland {
-        out.push(("wl-copy", &[]));
-    }
-    if has_x11 {
-        out.push(("xclip", &["-selection", "clipboard"]));
-        out.push(("xsel", &["--clipboard", "--input"]));
-    }
-    if is_macos {
-        out.push(("pbcopy", &[]));
-    }
-    out
-}
-
-/// Tries each candidate clipboard CLI until one accepts the text. Returns true
-/// on the first success, false if none are installed or all fail.
-fn copy_via_native_tool(text: &str) -> bool {
-    native_clipboard_candidates()
-        .into_iter()
-        .any(|(program, args)| pipe_to_command(program, args, text))
-}
-
-/// Spawns `program args`, writes `text` to its stdin, and waits. Returns true
-/// only when the process started and exited successfully. Errors (missing
-/// binary, write failure, non-zero exit) are swallowed so the caller can fall
-/// through to the next candidate or to OSC 52.
-fn pipe_to_command(program: &str, args: &[&str], text: &str) -> bool {
-    use std::process::{Command, Stdio};
-    let Ok(mut child) = Command::new(program)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return false;
-    };
-    // Scoped so stdin is dropped (closed → EOF) before we wait, otherwise tools
-    // like xclip block forever waiting for more input.
-    if let Some(mut stdin) = child.stdin.take() {
-        if stdin.write_all(text.as_bytes()).is_err() {
-            let _ = child.kill();
-            let _ = child.wait();
-            return false;
-        }
-    }
-    matches!(child.wait(), Ok(status) if status.success())
 }
 
 impl Drop for TtyDisplay {
@@ -3115,33 +3105,16 @@ mod tests {
         assert_eq!(seq, "\x1b]52;c;Zm9vYmFy\x07");
     }
 
+    /// A clipboard tool that doesn't exist must report failure (not panic), so
+    /// `native_clipboard_copy` can move on to the next candidate or fall back to
+    /// OSC 52.
     #[test]
-    fn clipboard_candidates_prefer_wayland_then_x11_then_macos() {
-        // Wayland desktop: wl-copy leads, X11 tools follow as a fallback for
-        // XWayland setups.
-        let names: Vec<_> = clipboard_candidates_for(true, true, false)
-            .into_iter()
-            .map(|(p, _)| p)
-            .collect();
-        assert_eq!(names, ["wl-copy", "xclip", "xsel"]);
-
-        // Pure X11.
-        let names: Vec<_> = clipboard_candidates_for(false, true, false)
-            .into_iter()
-            .map(|(p, _)| p)
-            .collect();
-        assert_eq!(names, ["xclip", "xsel"]);
-
-        // Headless / no display server, non-macOS → nothing native; the writer
-        // falls through to OSC 52.
-        assert!(clipboard_candidates_for(false, false, false).is_empty());
-
-        // macOS always has pbcopy regardless of display server.
-        let names: Vec<_> = clipboard_candidates_for(false, false, true)
-            .into_iter()
-            .map(|(p, _)| p)
-            .collect();
-        assert_eq!(names, ["pbcopy"]);
+    fn try_clipboard_command_false_for_missing_program() {
+        assert!(!try_clipboard_command(
+            "baraddur-no-such-clipboard-tool",
+            &[],
+            "payload"
+        ));
     }
 
     fn named_result(name: &str, success: bool, stdout: &str, stderr: &str) -> StepResult {
