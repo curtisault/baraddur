@@ -1,0 +1,44 @@
+# Barad-dûr
+
+> A project-agnostic file-watcher CLI written in Rust. It watches source files and runs a configurable pipeline of check/build/test steps on every save, surfacing failures before CI does. The same pipeline runs as a one-shot (`baraddur check`) or as a gate around another command (`baraddur gate git push`), so the rules tuned for save-time also gate commits and pushes.
+
+Key facts:
+
+- Distributed on crates.io as `baraddur`; install with `cargo install baraddur`.
+- Configured via a walk-up `.baraddur.toml` file. Run `baraddur init` to scaffold one.
+- Subcommands: `init` (scaffold config), `check` (run pipeline once, exit codes 0/1/2), `gate <cmd...>` (run pipeline, exec wrapped command on success). Bare `baraddur` starts watch mode.
+- Steps are grouped into stages by their `parallel` flag; a failing stage skips all later stages. Mid-run file changes kill child processes and restart the pipeline.
+- Output goes through a `Display` trait: `PlainDisplay` for non-TTY/CI, `TtyDisplay` for interactive use. JSON/NDJSON output is available via `--format json`. `NO_COLOR=1` suppresses color.
+- License: MIT OR Apache-2.0. Repository: https://github.com/curtisault/baraddur
+
+## Documentation
+
+- [Install](docs/install.md): crates.io install, pre-built binaries, building from source, supported platforms.
+- [Configuration](docs/configuration.md): `.baraddur.toml` schema, step definitions, path-based `if_changed` filtering, `{files}` templating, the `[on_failure]` hook, and examples.
+- [Watch mode](docs/watch-mode.md): browse mode, keybindings (`r` rerun all, `f` rerun failed), in-place terminal rendering.
+- [One-shot mode](docs/one-shot.md): `check` and `gate` subcommands, git-aware filtering (`--staged`, `--since <ref>`), pre-commit usage.
+- [CLI reference](docs/cli.md): all flags, verbosity levels, output modes, log file behavior.
+- [Security](docs/security.md): trust model for executing commands from `.baraddur.toml`.
+- [JSON event stream](docs/json-events.md): NDJSON output format for integrations.
+- [UX design](docs/ux-design.md): terminal UX states and transitions.
+
+## Source layout
+
+- [src/main.rs](src/main.rs): CLI arg parsing via clap; calls `lib::run()`.
+- [src/lib.rs](src/lib.rs): main async loop — `tokio::select!` over file events, pipeline results, and Ctrl-C.
+- [src/config/](src/config): walk-up `.baraddur.toml` discovery, serde schema (`deny_unknown_fields`), validation.
+- [src/pipeline/](src/pipeline): stage grouping, parallel execution via `JoinSet`, step runner, `if_changed` path filtering, the on-failure hook.
+- [src/output/](src/output): the `Display` trait and its `PlainDisplay`/`TtyDisplay` implementations, JSON output, color styling.
+- [src/watcher/](src/watcher): the `notify`-based file watcher with manual debounce and extension filtering.
+
+## Build & verification
+
+- `just ci`: fmt-check + clippy (`-D warnings`) + test — the gate; must pass clean. This is the definition of "done".
+- `just build` / `just release`: debug / optimized build.
+- `just install`: release build copied to `~/.local/bin`.
+- `just test`: `cargo test` only. `just lint`: `cargo clippy -- -D warnings`.
+
+## Optional
+
+- [AGENTS.md](AGENTS.md): agent-facing guide to the architecture, key patterns, and invariants (also symlinked as CLAUDE.md).
+- [README.md](README.md): project overview and quick start.
