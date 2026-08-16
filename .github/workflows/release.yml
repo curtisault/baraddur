@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - "v*"
+  # Dispatched by tag.yml on the tag ref, since tags pushed with
+  # GITHUB_TOKEN don't fire the push trigger above.
+  workflow_dispatch:
 
 permissions:
   contents: write
