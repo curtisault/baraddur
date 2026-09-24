@@ -299,3 +299,119 @@ mod tests {
         assert_eq!(pending, vec![PathBuf::from("src/a.rs")]);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use notify::event::{AccessKind, DataChange, ModifyKind};
+    use proptest::prelude::*;
+    use std::path::Path;
+
+    fn component() -> impl Strategy<Value = String> {
+        "[a-zA-Z0-9_]{1,6}"
+    }
+
+    fn ext() -> impl Strategy<Value = String> {
+        "[a-z0-9]{1,4}"
+    }
+
+    /// `(dirs, stem, ext)` assembled into `dirs.../stem.ext`, with the
+    /// pieces kept so the expected answer doesn't need `Path::extension`.
+    fn structured_path() -> impl Strategy<Value = (Vec<String>, String, String)> {
+        (
+            prop::collection::vec(component(), 0..4),
+            "[a-zA-Z0-9_][a-zA-Z0-9_.]{0,6}",
+            ext(),
+        )
+    }
+
+    fn assemble(dirs: &[String], stem: &str, ext: &str) -> PathBuf {
+        let mut p = PathBuf::new();
+        for d in dirs {
+            p.push(d);
+        }
+        p.push(format!("{stem}.{ext}"));
+        p
+    }
+
+    fn watch_cfg(exts: Vec<String>, ignore: Vec<String>) -> WatchConfig {
+        WatchConfig {
+            root: PathBuf::from("."),
+            debounce: Duration::from_millis(1000),
+            extensions: exts,
+            ignore,
+        }
+    }
+
+    proptest! {
+        /// With no ignore list, a path passes iff its extension is wanted
+        /// (or no extensions are configured at all).
+        #[test]
+        fn extension_filter_matches_generated_extension(
+            (dirs, stem, ext) in structured_path(),
+            wanted in prop::collection::vec(ext(), 0..4),
+        ) {
+            let path = assemble(&dirs, &stem, &ext);
+            let cfg = watch_cfg(wanted.clone(), Vec::new());
+            let expected = wanted.is_empty() || wanted.contains(&ext);
+            prop_assert_eq!(matches_filters(&path, &cfg), expected);
+        }
+
+        /// Ignoring any directory component of a path rejects it, and
+        /// ignoring a name that appears nowhere in it changes nothing.
+        #[test]
+        fn component_ignore_rejects_iff_present(
+            (dirs, stem, ext) in structured_path(),
+            idx in any::<prop::sample::Index>(),
+            other in component(),
+        ) {
+            let path = assemble(&dirs, &stem, &ext);
+            let no_ignore = watch_cfg(Vec::new(), Vec::new());
+            prop_assert!(matches_filters(&path, &no_ignore));
+
+            if !dirs.is_empty() {
+                let ignored = dirs[idx.index(dirs.len())].clone();
+                prop_assert!(!matches_filters(&path, &watch_cfg(Vec::new(), vec![ignored])));
+            }
+
+            let file_name = format!("{stem}.{ext}");
+            if !dirs.contains(&other) && other != file_name {
+                prop_assert!(matches_filters(&path, &watch_cfg(Vec::new(), vec![other])));
+            }
+        }
+
+        /// Whatever stream of events arrives, the pending batch never holds
+        /// a duplicate, never holds a filtered-out path, and grows only on
+        /// mutation events.
+        #[test]
+        fn pending_batch_is_deduped_and_filtered(
+            events in prop::collection::vec(
+                (any::<bool>(), prop::collection::vec("[a-z]{1,3}(/[a-z]{1,3}){0,2}\\.(rs|md)", 0..4)),
+                0..12,
+            ),
+        ) {
+            let cfg = watch_cfg(vec!["rs".into()], vec!["target".into()]);
+            let mut pending: Vec<PathBuf> = Vec::new();
+            for (is_access, paths) in events {
+                let kind = if is_access {
+                    EventKind::Access(AccessKind::Read)
+                } else {
+                    EventKind::Modify(ModifyKind::Data(DataChange::Content))
+                };
+                let mut ev = notify::Event::new(kind);
+                for p in &paths {
+                    ev = ev.add_path(PathBuf::from(p));
+                }
+                let before = pending.len();
+                accumulate_paths(&mut pending, &ev, &cfg);
+                if is_access {
+                    prop_assert_eq!(pending.len(), before);
+                }
+            }
+            let unique: std::collections::HashSet<&Path> =
+                pending.iter().map(PathBuf::as_path).collect();
+            prop_assert_eq!(unique.len(), pending.len());
+            prop_assert!(pending.iter().all(|p| matches_filters(p, &cfg)));
+        }
+    }
+}

@@ -46,8 +46,15 @@ install: release
 _sign path:
     @if [ "$(uname)" = "Darwin" ]; then codesign --force --sign - {{path}}; fi
 
-test:
+# Runs the whole suite, then the property tests again as their own step so
+# they show up explicitly (and can be tuned via `just proptest N`).
+test: proptest
     cargo test
+
+# Property tests only (they also run as part of `test`). Pass a case count to
+# hammer them harder than the default 256, e.g. `just proptest 10000`.
+proptest cases="256":
+    PROPTEST_CASES={{cases}} cargo test proptests
 
 check:
     cargo check

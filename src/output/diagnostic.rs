@@ -234,3 +234,76 @@ mod tests {
         assert!(parse("just text with no diags\n").is_empty());
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// A path the heuristic accepts: no whitespace or colons, at least one
+    /// of `/`, `.`, `\`.
+    fn diag_path() -> impl Strategy<Value = String> {
+        "[A-Za-z0-9_-]{0,6}[./\\\\][A-Za-z0-9_./\\\\-]{0,10}"
+    }
+
+    fn loc(path: &str, line: u32, col: Option<u32>) -> String {
+        match col {
+            Some(c) => format!("{path}:{line}:{c}"),
+            None => format!("{path}:{line}"),
+        }
+    }
+
+    proptest! {
+        /// The parser is fed arbitrary tool output; it must never panic
+        /// (byte-indexed slicing over unicode is the risk) and its result
+        /// must be free of duplicate locations.
+        #[test]
+        fn parse_never_panics_and_dedups(output in any::<String>()) {
+            let diags = parse(&output);
+            let mut seen = std::collections::HashSet::new();
+            for d in &diags {
+                prop_assert!(seen.insert((d.path.clone(), d.line, d.col)));
+            }
+            for line in output.lines() {
+                let _ = extract_line(line);
+            }
+        }
+
+        /// Every supported producer format round-trips a generated
+        /// `(path, line, col?)` triple exactly.
+        #[test]
+        fn known_formats_roundtrip(
+            path in diag_path(),
+            line in any::<u32>(),
+            col in prop::option::of(any::<u32>()),
+        ) {
+            let expected = Diagnostic { path: PathBuf::from(&path), line, col };
+            let l = loc(&path, line, col);
+            let inputs = [
+                format!("  --> {l}"),
+                format!("  ::: {l}"),
+                format!("thread 'main' panicked at {l}:"),
+                format!("thread 'main' panicked at 'boom', {l}"),
+                format!("{l}: error: something"),
+                format!("    {l}: warning"),
+            ];
+            for input in &inputs {
+                prop_assert_eq!(extract_line(input), Some(expected.clone()), "input: {:?}", input);
+            }
+        }
+
+        /// Bare identifiers followed by `:digits` are not diagnostics, no
+        /// matter which marker precedes them.
+        #[test]
+        fn bare_identifiers_are_rejected(ident in "[A-Za-z_][A-Za-z0-9_-]{0,12}", line in any::<u32>()) {
+            let inputs = [
+                format!("  --> {ident}:{line}"),
+                format!("Caused by: {ident}:{line} stuff"),
+                format!("{ident}:{line}: error"),
+            ];
+            for input in &inputs {
+                prop_assert_eq!(extract_line(input), None, "input: {:?}", input);
+            }
+        }
+    }
+}
