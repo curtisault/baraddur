@@ -83,13 +83,13 @@ The cleanup plan for the remaining flagged functions lives in
 | ✓ | 5.0 | 5 | 100.0 | `accumulate_paths` | `./src/watcher/mod.rs:86` |
 | ✓ | 4.1 | 4 | 84.2 | `repo_root` | `./src/git.rs:12` |
 | ✓ | 4.0 | 4 | 85.7 | `TtyDisplay::open_current_diagnostic` | `./src/output/display.rs:879` |
+| ✓ | 4.0 | 4 | 100.0 | `parse` | `./src/output/diagnostic.rs:28` |
 | ✓ | 4.0 | 4 | 100.0 | `format_trigger_suffix` | `./src/output/display.rs:153` |
 | ✓ | 4.0 | 4 | 100.0 | `redraw_strategy` | `./src/output/display.rs:186` |
 | ✓ | 4.0 | 4 | 100.0 | `PlainDisplay::step_finished` | `./src/output/display.rs:269` |
 | ✓ | 4.0 | 4 | 100.0 | `base64_encode` | `./src/output/display.rs:489` |
 | ✓ | 4.0 | 4 | 100.0 | `TtyDisplay::prepare_redraw_region` | `./src/output/display.rs:731` |
 | ✓ | 4.0 | 4 | 100.0 | `TtyDisplay::summary_line` | `./src/output/display.rs:1428` |
-| ✓ | 4.0 | 4 | 100.0 | `parse` | `./src/output/diagnostic.rs:28` |
 | ✓ | 4.0 | 4 | 100.0 | `App::rerun_params` | `./src/lib.rs:532` |
 | ✓ | 4.0 | 4 | 100.0 | `warn_loop_lines` | `./src/lib.rs:669` |
 | ✓ | 3.7 | 3 | 57.1 | `App::build_display` | `./src/lib.rs:120` |

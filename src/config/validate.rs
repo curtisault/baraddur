@@ -377,6 +377,39 @@ mod proptests {
             prop_assert!(result.is_ok(), "unexpected errors: {}", result.unwrap_err());
         }
 
+        /// Cross-module contract: a profile that passed validation always
+        /// applies, and keeps exactly its members in declaration order.
+        /// When no profiles exist, any name is rejected.
+        #[test]
+        fn validated_profiles_always_apply(
+            cfg in valid_config(),
+            pick in any::<prop::sample::Index>(),
+            bogus in "[a-z]{1,6}",
+        ) {
+            prop_assert!(validate(&cfg).is_ok());
+            let original: Vec<String> = cfg.steps.iter().map(|s| s.name.clone()).collect();
+            let mut applied = cfg;
+
+            let mut names: Vec<String> = applied.profiles.keys().cloned().collect();
+            if names.is_empty() {
+                prop_assert!(crate::apply_profile(&mut applied, &bogus).is_err());
+                return Ok(());
+            }
+            names.sort();
+            let profile = names[pick.index(names.len())].clone();
+            let members = applied.profiles[&profile].clone();
+
+            crate::apply_profile(&mut applied, &profile).unwrap();
+
+            let expected: Vec<String> = original
+                .into_iter()
+                .filter(|n| members.contains(n))
+                .collect();
+            let got: Vec<String> = applied.steps.iter().map(|s| s.name.clone()).collect();
+            prop_assert_eq!(got, expected);
+            prop_assert!(!applied.steps.is_empty());
+        }
+
         /// Each independent fault injected into a valid config yields
         /// exactly one error, and they accumulate rather than short-circuit.
         #[test]

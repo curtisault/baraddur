@@ -54,7 +54,7 @@ test: proptest
 # Property tests only (they also run as part of `test`). Pass a case count to
 # hammer them harder than the default 256, e.g. `just proptest 10000`.
 proptest cases="256":
-    PROPTEST_CASES={{cases}} cargo test --lib proptests
+    PROPTEST_CASES={{cases}} cargo test proptests
 
 check:
     cargo check

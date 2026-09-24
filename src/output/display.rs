@@ -3232,3 +3232,142 @@ mod tests {
         assert_eq!(d.transient_message.as_deref(), Some("no failures to copy"));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Independent reference decoder so the round-trip doesn't share code
+    /// with the encoder under test.
+    fn b64_decode(s: &str) -> Vec<u8> {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let vals: Vec<u32> = s
+            .bytes()
+            .filter(|&b| b != b'=')
+            .map(|b| ALPHABET.iter().position(|&a| a == b).expect("in alphabet") as u32)
+            .collect();
+        let mut out = Vec::new();
+        for chunk in vals.chunks(4) {
+            let mut n = 0u32;
+            for (i, v) in chunk.iter().enumerate() {
+                n |= v << (18 - 6 * i);
+            }
+            let bytes = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+            out.extend_from_slice(&bytes[..chunk.len() - 1]);
+        }
+        out
+    }
+
+    /// `(viewport, cursor_h, cursor_top, total_rows, scroll)` with the cursor
+    /// step fitting inside both the viewport and the content, which is the
+    /// only regime in which "cursor stays visible" is satisfiable.
+    fn scroll_inputs() -> impl Strategy<Value = (usize, usize, usize, usize, usize)> {
+        (1usize..40).prop_flat_map(|viewport| {
+            (1usize..=viewport, 0usize..80).prop_flat_map(move |(cursor_h, cursor_top)| {
+                let min_total = cursor_top + cursor_h;
+                (
+                    Just(viewport),
+                    Just(cursor_h),
+                    Just(cursor_top),
+                    min_total..min_total + 40,
+                    0usize..160,
+                )
+            })
+        })
+    }
+
+    fn laid_out_lines() -> impl Strategy<Value = Vec<(String, usize)>> {
+        prop::collection::vec(1usize..5, 0..20).prop_map(|rows| {
+            rows.into_iter()
+                .enumerate()
+                .map(|(i, r)| (format!("line{i}"), r))
+                .collect()
+        })
+    }
+
+    proptest! {
+        /// Length, alphabet and padding follow the RFC 4648 shape, and an
+        /// independent decoder recovers the input byte-for-byte.
+        #[test]
+        fn base64_roundtrips_with_correct_shape(data in prop::collection::vec(any::<u8>(), 0..200)) {
+            let encoded = base64_encode(&data);
+            prop_assert_eq!(encoded.len(), data.len().div_ceil(3) * 4);
+            let padding = encoded.bytes().rev().take_while(|&b| b == b'=').count();
+            prop_assert_eq!(padding, (3 - data.len() % 3) % 3);
+            let body = &encoded[..encoded.len() - padding];
+            prop_assert!(body.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/'));
+            prop_assert_eq!(b64_decode(&encoded), data);
+        }
+
+        /// The OSC 52 wrapper is `ESC ] 52 ; c ; <base64> BEL` with nothing
+        /// but base64 in the payload, so any text (including control
+        /// characters) travels safely through the terminal.
+        #[test]
+        fn osc52_payload_is_pure_base64(text in any::<String>()) {
+            let seq = osc52_sequence(&text);
+            prop_assert!(seq.starts_with("\x1b]52;c;"));
+            prop_assert!(seq.ends_with('\x07'));
+            let payload = &seq["\x1b]52;c;".len()..seq.len() - 1];
+            prop_assert!(payload.bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b)));
+            prop_assert_eq!(b64_decode(payload), text.into_bytes());
+        }
+
+        /// After clamping, the cursor step is fully inside the viewport, the
+        /// window never scrolls past the end of the content, and clamping
+        /// again is a no-op.
+        #[test]
+        fn clamp_scroll_keeps_cursor_visible(
+            (viewport, cursor_h, cursor_top, total_rows, scroll) in scroll_inputs(),
+        ) {
+            let s = TtyDisplay::clamp_scroll(scroll, cursor_top, cursor_h, viewport, total_rows);
+            prop_assert!(s <= cursor_top, "window starts below the cursor");
+            prop_assert!(cursor_top + cursor_h <= s + viewport, "cursor bottom is off-screen");
+            prop_assert!(s <= total_rows.saturating_sub(viewport), "scrolled past the content");
+            prop_assert_eq!(
+                TtyDisplay::clamp_scroll(s, cursor_top, cursor_h, viewport, total_rows),
+                s
+            );
+        }
+
+        /// The slice is contiguous and in bounds, `rendered` is exactly the
+        /// rows of the selected lines, the viewport check fires before a
+        /// line is added, and the partial-skip rule holds: every row before
+        /// the first painted line is at or beyond `scroll`, while the line
+        /// just before it began before `scroll`.
+        #[test]
+        fn viewport_slice_respects_scroll_and_viewport(
+            lines in laid_out_lines(),
+            scroll in 0usize..60,
+            viewport in 0usize..30,
+        ) {
+            let (range, rendered) = TtyDisplay::viewport_slice(&lines, scroll, viewport);
+            prop_assert!(range.start <= range.end && range.end <= lines.len());
+
+            let rows_in: usize = lines[range.clone()].iter().map(|(_, r)| r).sum();
+            prop_assert_eq!(rendered, rows_in);
+
+            if !range.is_empty() {
+                let last_rows = lines[range.end - 1].1;
+                prop_assert!(rendered - last_rows < viewport, "kept painting past the viewport");
+
+                let prefix = |n: usize| -> usize { lines[..n].iter().map(|(_, r)| r).sum() };
+                prop_assert!(prefix(range.start) >= scroll, "painted rows above the scroll offset");
+                if range.start > 0 {
+                    prop_assert!(prefix(range.start - 1) < scroll, "skipped a line that starts at or after scroll");
+                }
+            }
+
+            let total: usize = lines.iter().map(|(_, r)| r).sum();
+            if scroll == 0 && viewport >= total {
+                prop_assert_eq!(range.clone(), 0..lines.len());
+                prop_assert_eq!(rendered, total);
+            }
+            if scroll >= total {
+                prop_assert!(range.is_empty());
+                prop_assert_eq!(rendered, 0);
+            }
+        }
+    }
+}

@@ -497,3 +497,114 @@ async fn only_steps_empty_runs_nothing() {
 
     assert!(results.is_empty());
 }
+
+// ── Property: failing stage skips everything after it ───────────────────────
+
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::collections::HashSet;
+
+    /// Steps that either pass (`true`) or fail (`false`), with random
+    /// parallel flags, so every stage shape and failure position is covered.
+    fn arb_steps() -> impl Strategy<Value = Vec<Step>> {
+        prop::collection::vec((any::<bool>(), any::<bool>()), 0..8).prop_map(|specs| {
+            specs
+                .into_iter()
+                .enumerate()
+                .map(|(i, (passes, parallel))| Step {
+                    name: format!("s{i}"),
+                    cmd: if passes { "true" } else { "false" }.into(),
+                    parallel,
+                    if_changed: Vec::new(),
+                })
+                .collect()
+        })
+    }
+
+    fn run(cfg: &Config, only: Option<&[String]>) -> (Vec<StepResult>, Vec<String>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut display = RecordingDisplay::default();
+        let results = rt
+            .block_on(pipeline::run_pipeline(
+                cfg,
+                &std::env::temp_dir(),
+                &mut display,
+                None,
+                None,
+                only,
+            ))
+            .unwrap();
+        (results, display.events)
+    }
+
+    proptest! {
+        // Every case spawns real processes; keep the count modest.
+        #![proptest_config(ProptestConfig::with_cases(48))]
+
+        /// Model: after `only_steps` narrowing, stages run in order until
+        /// the first stage containing a failing step; that stage completes
+        /// in full and every later stage is skipped. Results carry exactly
+        /// the steps that ran, each with the success its command implies,
+        /// and the display sees the skipped names exactly once each.
+        #[test]
+        fn failing_stage_skips_all_later_stages(
+            steps in arb_steps(),
+            only in prop::option::of(prop::collection::hash_set(0usize..8, 0..8)),
+        ) {
+            let only_names: Option<Vec<String>> =
+                only.map(|idxs| idxs.into_iter().map(|i| format!("s{i}")).collect());
+
+            let active: Vec<Step> = steps
+                .iter()
+                .filter(|s| only_names.as_ref().is_none_or(|n| n.contains(&s.name)))
+                .cloned()
+                .collect();
+
+            let mut expect_ran: Vec<String> = Vec::new();
+            let mut expect_skipped: Vec<String> = Vec::new();
+            let mut failed = false;
+            for stage in pipeline::group_into_stages(&active) {
+                for s in &stage.steps {
+                    if failed {
+                        expect_skipped.push(s.name.clone());
+                    } else {
+                        expect_ran.push(s.name.clone());
+                    }
+                }
+                if stage.steps.iter().any(|s| s.cmd == "false") {
+                    failed = true;
+                }
+            }
+
+            let cfg = make_config(steps.clone());
+            let (results, events) = run(&cfg, only_names.as_deref());
+
+            // Parallel stages complete in arbitrary order, so compare as sets
+            // for membership and rely on stage order for everything else.
+            let ran: HashSet<&str> = results.iter().map(|r| r.name.as_str()).collect();
+            let expected: HashSet<&str> = expect_ran.iter().map(String::as_str).collect();
+            prop_assert_eq!(results.len(), expect_ran.len(), "duplicate or missing results");
+            prop_assert_eq!(ran, expected);
+
+            for r in &results {
+                let step = steps.iter().find(|s| s.name == r.name).unwrap();
+                prop_assert_eq!(r.success, step.cmd == "true", "step {}", r.name);
+            }
+
+            let skipped: Vec<String> = events
+                .iter()
+                .filter_map(|e| e.strip_prefix("skipped:"))
+                .map(str::to_owned)
+                .collect();
+            prop_assert_eq!(skipped, expect_skipped);
+
+            let active_names: Vec<String> = active.iter().map(|s| s.name.clone()).collect();
+            prop_assert_eq!(&events[0], &format!("run_started:{}", active_names.join(",")));
+            prop_assert_eq!(events.last().map(String::as_str), Some("run_finished"));
+        }
+    }
+}
