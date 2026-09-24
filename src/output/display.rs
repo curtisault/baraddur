@@ -1756,9 +1756,7 @@ impl Display for TtyDisplay {
             }
             KeyCode::Char('O') => {
                 self.all_expanded = !self.all_expanded;
-                for e in &mut self.expanded {
-                    *e = self.all_expanded;
-                }
+                self.expanded.fill(self.all_expanded);
                 self.last_key = None;
                 BrowseAction::Redraw
             }

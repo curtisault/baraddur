@@ -16,12 +16,12 @@ The cleanup plan for the remaining flagged functions lives in
 
 <!-- cargo-crap-report -->
 
-## ⚠️ 2 function(s) exceed CRAP threshold 30
+## ⚠️ 1 function(s) exceed CRAP threshold 30
 
 | | CRAP | CC | Cov % | Function | Location |
 |---|---:|---:|---:|---|---|
 | ✗ | 58.2 | 21 | 56.1 | `App::run_until` | `./src/lib.rs:222` |
-| ✗ | 30.2 | 30 | 94.4 | `TtyDisplay::handle_key` | `./src/output/display.rs:1701` |
+| ▲ | 29.2 | 29 | 94.3 | `TtyDisplay::handle_key` | `./src/output/display.rs:1701` |
 | ▲ | 26.3 | 12 | 53.7 | `TtyDisplay::redraw` | `./src/output/display.rs:906` |
 | ▲ | 21.0 | 20 | 86.4 | `validate` | `./src/config/validate.rs:25` |
 | ▲ | 20.0 | 20 | 95.9 | `main` | `./src/main.rs:140` |
@@ -192,4 +192,4 @@ The cleanup plan for the remaining flagged functions lives in
 | ✓ | 1.0 | 1 | 100.0 | `LoopGuard::reset` | `./src/loop_guard.rs:47` |
 | ✓ | 1.0 | 1 | 100.0 | `rel_paths` | `./src/lib.rs:743` |
 
-✗ 2/171 function(s) exceed CRAP threshold 30.
+✗ 1/171 function(s) exceed CRAP threshold 30.
