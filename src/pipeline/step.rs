@@ -84,3 +84,39 @@ fn truncate_capture(bytes: &[u8]) -> (String, bool) {
         (s, true)
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Sizes clustered around the truncation boundary plus small ones, so
+    /// the interesting edge is hit far more often than uniform sampling
+    /// over 100 KiB would manage.
+    fn capture_size() -> impl Strategy<Value = usize> {
+        prop_oneof![
+            0usize..512,
+            (MAX_CAPTURE_BYTES - 8)..(MAX_CAPTURE_BYTES + 8),
+        ]
+    }
+
+    proptest! {
+        /// The truncated flag is set exactly when input exceeds the cap; the
+        /// untruncated text is the full lossy decode, the truncated text is
+        /// the lossy decode of the first `MAX_CAPTURE_BYTES` plus a marker.
+        #[test]
+        fn truncation_is_exactly_at_the_cap(size in capture_size(), seed in any::<u8>()) {
+            let bytes: Vec<u8> = (0..size).map(|i| seed.wrapping_add(i as u8)).collect();
+            let (text, truncated) = truncate_capture(&bytes);
+
+            prop_assert_eq!(truncated, bytes.len() > MAX_CAPTURE_BYTES);
+            if truncated {
+                let head = String::from_utf8_lossy(&bytes[..MAX_CAPTURE_BYTES]);
+                prop_assert!(text.starts_with(head.as_ref()));
+                prop_assert!(text.ends_with("truncated at 100 KiB] ...\n"));
+            } else {
+                prop_assert_eq!(text, String::from_utf8_lossy(&bytes).into_owned());
+            }
+        }
+    }
+}

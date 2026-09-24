@@ -274,3 +274,152 @@ mod tests {
         assert!(err.to_string().contains("timeout_secs"));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::config::schema::{Config, OnFailureConfig, OutputConfig, Step, WatchConfig};
+    use proptest::prelude::*;
+    use std::collections::HashMap;
+
+    fn valid_glob() -> impl Strategy<Value = String> {
+        prop::sample::select(vec!["**/*.rs", "src/**", "*.toml", "docs/*.md"])
+            .prop_map(str::to_owned)
+    }
+
+    /// A config that satisfies every rule `validate` checks: unique
+    /// non-blank names, tokenizable non-blank cmds, valid globs, sane
+    /// debounce, profiles that reference real steps, and a hook that is
+    /// either off or fully specified.
+    fn valid_config() -> impl Strategy<Value = Config> {
+        let step_names = prop::collection::hash_set("[a-z][a-z0-9_-]{0,7}", 1..6);
+        step_names
+            .prop_flat_map(|names| {
+                let names: Vec<String> = names.into_iter().collect();
+                let n = names.len();
+                let steps = prop::collection::vec(
+                    (
+                        "[a-z]+( [a-z0-9=-]+){0,3}",
+                        any::<bool>(),
+                        prop::collection::vec(valid_glob(), 0..3),
+                    ),
+                    n,
+                )
+                .prop_map(move |specs| {
+                    specs
+                        .into_iter()
+                        .zip(names.iter())
+                        .map(|((cmd, parallel, if_changed), name)| Step {
+                            name: name.clone(),
+                            cmd,
+                            parallel,
+                            if_changed,
+                        })
+                        .collect::<Vec<Step>>()
+                });
+                let profiles = prop::collection::hash_map(
+                    "[a-z]{1,6}",
+                    prop::collection::vec(any::<prop::sample::Index>(), 1..4),
+                    0..3,
+                );
+                (steps, profiles)
+            })
+            .prop_map(|(steps, profiles)| {
+                let profiles: HashMap<String, Vec<String>> = profiles
+                    .into_iter()
+                    .map(|(k, idxs)| {
+                        let members = idxs
+                            .iter()
+                            .map(|i| steps[i.index(steps.len())].name.clone())
+                            .collect();
+                        (k, members)
+                    })
+                    .collect();
+                (steps, profiles)
+            })
+            .prop_flat_map(|(steps, profiles)| {
+                (
+                    Just(steps),
+                    Just(profiles),
+                    50u64..10_000,
+                    any::<bool>(),
+                    "[a-z]+( [a-z]+){0,2}",
+                    1u64..120,
+                )
+            })
+            .prop_map(
+                |(steps, profiles, debounce_ms, enabled, cmd, timeout_secs)| Config {
+                    watch: WatchConfig {
+                        extensions: vec!["rs".into()],
+                        debounce_ms,
+                        ignore: vec![],
+                    },
+                    output: OutputConfig::default(),
+                    on_failure: OnFailureConfig {
+                        enabled,
+                        cmd,
+                        prompt: String::new(),
+                        timeout_secs,
+                    },
+                    steps,
+                    profiles,
+                },
+            )
+    }
+
+    proptest! {
+        /// Any config built inside the rules validates cleanly. Guards
+        /// against a rule accidentally tightening past its documented bound
+        /// (e.g. rejecting `debounce_ms = 50` or a one-step profile).
+        #[test]
+        fn well_formed_configs_validate(cfg in valid_config()) {
+            let result = validate(&cfg);
+            prop_assert!(result.is_ok(), "unexpected errors: {}", result.unwrap_err());
+        }
+
+        /// Each independent fault injected into a valid config yields
+        /// exactly one error, and they accumulate rather than short-circuit.
+        #[test]
+        fn faults_are_reported_one_each(
+            mut cfg in valid_config(),
+            dup_name in any::<bool>(),
+            blank_cmd in any::<bool>(),
+            bad_glob in any::<bool>(),
+            tiny_debounce in any::<bool>(),
+            ghost_profile in any::<bool>(),
+        ) {
+            let mut expected = 0;
+            if dup_name {
+                let clone = Step {
+                    name: cfg.steps[0].name.clone(),
+                    cmd: "true".into(),
+                    parallel: false,
+                    if_changed: Vec::new(),
+                };
+                cfg.steps.push(clone);
+                expected += 1;
+            }
+            if blank_cmd {
+                cfg.steps[0].cmd = "   ".into();
+                expected += 1;
+            }
+            if bad_glob {
+                cfg.steps[0].if_changed.push("[unclosed".into());
+                expected += 1;
+            }
+            if tiny_debounce {
+                cfg.watch.debounce_ms = 49;
+                expected += 1;
+            }
+            if ghost_profile {
+                cfg.profiles.insert("zz-ghost".into(), vec!["no-such-step".into()]);
+                expected += 1;
+            }
+
+            match validate(&cfg) {
+                Ok(()) => prop_assert_eq!(expected, 0),
+                Err(errs) => prop_assert_eq!(errs.0.len(), expected, "errors: {}", errs),
+            }
+        }
+    }
+}

@@ -179,3 +179,121 @@ mod tests {
         assert_eq!(out[0].cmd, "cargo check");
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::path::PathBuf;
+
+    /// Path-like strings covering the characters that trip up naive shell
+    /// joining: spaces, quotes, `$`, backslashes, tabs and newlines.
+    fn hostile_path() -> impl Strategy<Value = String> {
+        "[a-zA-Z0-9_./ '\"$\\\\!*?\\t\\n-]{1,24}"
+    }
+
+    /// Paths with a recognisable extension so a glob can partition them.
+    fn ext_path() -> impl Strategy<Value = String> {
+        "[a-z][a-z/]{0,8}\\.(rs|md|toml)"
+    }
+
+    fn step(name: &str, cmd: &str, if_changed: &[&str]) -> Step {
+        Step {
+            name: name.into(),
+            cmd: cmd.into(),
+            parallel: false,
+            if_changed: if_changed.iter().map(|s| (*s).into()).collect(),
+        }
+    }
+
+    fn arb_step() -> impl Strategy<Value = Step> {
+        (
+            "[a-z]{1,8}",
+            prop::bool::ANY,
+            prop::collection::vec(
+                prop::sample::select(vec!["*.rs", "*.md", "src/**", "*.toml"]),
+                0..3,
+            ),
+        )
+            .prop_map(|(name, templated, globs)| {
+                let cmd = if templated { "run {files}" } else { "run" };
+                step(&name, cmd, &globs)
+            })
+    }
+
+    proptest! {
+        /// Whatever the trigger, the output is a subsequence of the input
+        /// (order preserved, nothing invented) and steps without `if_changed`
+        /// always survive.
+        #[test]
+        fn output_is_an_ordered_subsequence(
+            steps in prop::collection::vec(arb_step(), 0..8),
+            trigger in prop::option::of(prop::collection::vec(ext_path(), 0..6)),
+        ) {
+            let trigger_paths: Option<Vec<PathBuf>> =
+                trigger.map(|ps| ps.into_iter().map(PathBuf::from).collect());
+            let out = filter_and_template(&steps, trigger_paths.as_deref()).unwrap();
+
+            let mut cursor = 0;
+            for kept in &out {
+                let pos = steps[cursor..]
+                    .iter()
+                    .position(|s| s.name == kept.name)
+                    .expect("output step must come from input, in order");
+                cursor += pos + 1;
+            }
+            for s in steps.iter().filter(|s| s.if_changed.is_empty()) {
+                prop_assert!(out.iter().any(|o| o.name == s.name));
+            }
+            let untemplated = out.iter().all(|o| !o.cmd.contains("{files}"));
+            prop_assert!(untemplated);
+        }
+
+        /// The initial run keeps every step and blanks the template.
+        #[test]
+        fn no_trigger_keeps_everything(steps in prop::collection::vec(arb_step(), 0..8)) {
+            let out = filter_and_template::<PathBuf>(&steps, None).unwrap();
+            prop_assert_eq!(out.len(), steps.len());
+            for (i, o) in out.iter().enumerate() {
+                let expected = steps[i].cmd.replace("{files}", "");
+                prop_assert_eq!(&o.cmd, &expected);
+            }
+        }
+
+        /// `{files}` substitution must round-trip through the same tokenizer
+        /// the step runner uses, one argv entry per path, however hostile
+        /// the path is.
+        #[test]
+        fn substituted_files_roundtrip_through_shell_split(
+            paths in prop::collection::vec(hostile_path(), 0..6),
+        ) {
+            let steps = vec![step("a", "run {files}", &[])];
+            let bufs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+            let out = filter_and_template(&steps, Some(&bufs)).unwrap();
+            let argv = shell_words::split(&out[0].cmd).unwrap();
+            prop_assert_eq!(&argv[0], "run");
+            prop_assert_eq!(&argv[1..], &paths[..]);
+        }
+
+        /// With `if_changed = ["*.rs"]`, the step runs iff some path ends in
+        /// `.rs`, and `{files}` receives exactly those paths in order.
+        #[test]
+        fn glob_partitions_trigger_paths(paths in prop::collection::vec(ext_path(), 0..8)) {
+            let steps = vec![step("rs", "run {files}", &["*.rs"])];
+            let bufs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+            let out = filter_and_template(&steps, Some(&bufs)).unwrap();
+
+            let matched: Vec<&str> = paths
+                .iter()
+                .map(String::as_str)
+                .filter(|p| p.ends_with(".rs"))
+                .collect();
+            if matched.is_empty() {
+                prop_assert!(out.is_empty());
+            } else {
+                let argv = shell_words::split(&out[0].cmd).unwrap();
+                prop_assert_eq!(&argv[1..], &matched[..]);
+            }
+        }
+    }
+}

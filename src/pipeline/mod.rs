@@ -147,3 +147,82 @@ mod tests {
         assert_eq!(stages[2].steps.len(), 2); // d, e
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Steps whose only interesting property is the `parallel` flag; names
+    /// are unique so the flattened output can be compared positionally.
+    fn steps() -> impl Strategy<Value = Vec<Step>> {
+        prop::collection::vec(any::<bool>(), 0..32).prop_map(|flags| {
+            flags
+                .into_iter()
+                .enumerate()
+                .map(|(i, parallel)| Step {
+                    name: format!("s{i}"),
+                    cmd: "true".into(),
+                    parallel,
+                    if_changed: Vec::new(),
+                })
+                .collect()
+        })
+    }
+
+    proptest! {
+        /// Grouping is a partition: flattening the stages gives back every
+        /// step exactly once, in declaration order.
+        #[test]
+        fn stages_partition_steps_in_order(steps in steps()) {
+            let stages = group_into_stages(&steps);
+            let flattened: Vec<&str> = stages
+                .iter()
+                .flat_map(|st| st.steps.iter().map(|s| s.name.as_str()))
+                .collect();
+            let expected: Vec<&str> = steps.iter().map(|s| s.name.as_str()).collect();
+            prop_assert_eq!(flattened, expected);
+            prop_assert!(stages.iter().all(|st| !st.steps.is_empty()));
+        }
+
+        /// A sequential step is always alone in its stage, so `is_parallel`
+        /// can only be true for stages made entirely of parallel steps.
+        #[test]
+        fn sequential_steps_are_never_batched(steps in steps()) {
+            for stage in group_into_stages(&steps) {
+                if stage.steps.iter().any(|s| !s.parallel) {
+                    prop_assert_eq!(stage.steps.len(), 1);
+                    prop_assert!(!stage.is_parallel());
+                }
+            }
+        }
+
+        /// Runs of consecutive parallel steps are batched maximally: two
+        /// adjacent stages are never both parallel-only.
+        #[test]
+        fn parallel_runs_are_maximal(steps in steps()) {
+            let stages = group_into_stages(&steps);
+            for pair in stages.windows(2) {
+                let both_parallel = pair
+                    .iter()
+                    .all(|st| st.steps.iter().all(|s| s.parallel));
+                prop_assert!(!both_parallel, "adjacent parallel stages should have merged");
+            }
+        }
+
+        /// Stage count equals the number of sequential steps plus the number
+        /// of maximal parallel runs — a direct restatement of the grouping rule.
+        #[test]
+        fn stage_count_matches_flag_runs(steps in steps()) {
+            let mut expected = 0;
+            let mut prev_parallel = false;
+            for s in &steps {
+                if !s.parallel || !prev_parallel {
+                    expected += 1;
+                }
+                prev_parallel = s.parallel;
+            }
+            prop_assert_eq!(group_into_stages(&steps).len(), expected);
+        }
+    }
+}

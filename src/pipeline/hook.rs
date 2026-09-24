@@ -222,3 +222,72 @@ mod tests {
         assert!(out.is_none());
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::time::Duration;
+
+    fn arb_result() -> impl Strategy<Value = StepResult> {
+        (
+            "[a-z]{1,8}",
+            any::<bool>(),
+            prop::option::of(-1i32..256),
+            "[ -~\\n]{0,40}",
+            "[ -~\\n]{0,40}",
+        )
+            .prop_map(|(name, success, exit_code, stdout, stderr)| StepResult {
+                name,
+                success,
+                exit_code,
+                stdout,
+                stderr,
+                duration: Duration::ZERO,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            })
+    }
+
+    proptest! {
+        /// Exactly the failed steps get a header, in order; passing steps
+        /// leave no trace; the whole thing is empty when nothing failed.
+        #[test]
+        fn headers_are_exactly_the_failed_steps(
+            results in prop::collection::vec(arb_result(), 0..6),
+        ) {
+            let combined = combine_failed_output(&results);
+            let headers: Vec<String> = combined
+                .lines()
+                .filter(|l| l.starts_with("=== ") && l.ends_with(") ==="))
+                .map(str::to_owned)
+                .collect();
+            let expected: Vec<String> = results
+                .iter()
+                .filter(|r| !r.success)
+                .map(|r| {
+                    let code = r.exit_code.map_or("unknown".to_string(), |c| c.to_string());
+                    format!("=== {} (exit: {}) ===", r.name, code)
+                })
+                .collect();
+            prop_assert_eq!(headers, expected);
+            if results.iter().all(|r| r.success) {
+                prop_assert!(combined.is_empty());
+            }
+        }
+
+        /// Every failed step's stdout and stderr appear verbatim, and the
+        /// output always ends in a newline so the hook sees clean lines.
+        #[test]
+        fn failed_output_is_preserved_verbatim(
+            results in prop::collection::vec(arb_result(), 1..6),
+        ) {
+            let combined = combine_failed_output(&results);
+            for r in results.iter().filter(|r| !r.success) {
+                prop_assert!(combined.contains(&r.stdout));
+                prop_assert!(combined.contains(&r.stderr));
+            }
+            prop_assert!(combined.is_empty() || combined.ends_with('\n'));
+        }
+    }
+}

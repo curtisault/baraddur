@@ -181,3 +181,47 @@ mod tests {
         assert!(s.contains('\x1b'), "expected ANSI escapes in: {s:?}");
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crossterm::style::Stylize;
+    use proptest::prelude::*;
+
+    /// Arbitrary text with no ESC byte: the "plain" side of the roundtrip.
+    fn plain_text() -> impl Strategy<Value = String> {
+        any::<String>().prop_map(|s| s.replace('\x1b', ""))
+    }
+
+    proptest! {
+        /// Stripping is the identity on text that has no escapes, and never
+        /// leaves an ESC behind; applying it twice is the same as once.
+        #[test]
+        fn strip_is_identity_on_plain_and_idempotent(s in plain_text(), raw in any::<String>()) {
+            prop_assert_eq!(strip_ansi(&s), s);
+            let once = strip_ansi(&raw);
+            prop_assert!(!once.contains('\x1b'));
+            prop_assert_eq!(strip_ansi(&once), once.clone());
+            prop_assert_eq!(visible_len(&raw), once.chars().count());
+        }
+
+        /// Styling text and stripping it gives the text back, and its
+        /// visible width is unaffected by the escapes crossterm inserts.
+        #[test]
+        fn styled_text_roundtrips(s in plain_text(), color in any::<bool>()) {
+            let theme = Theme::new(color);
+            let rendered = format!(
+                "{}{}{}",
+                theme.style(&s, |t| t.green().bold()),
+                theme.red(&s),
+                theme.cyan_underline(&s),
+            );
+            let expected = format!("{s}{s}{s}");
+            prop_assert_eq!(strip_ansi(&rendered), expected.clone());
+            prop_assert_eq!(visible_len(&rendered), expected.chars().count());
+            if !color {
+                prop_assert_eq!(rendered, expected);
+            }
+        }
+    }
+}

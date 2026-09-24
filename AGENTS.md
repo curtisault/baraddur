@@ -48,6 +48,7 @@ src/
 
 - Unit tests live alongside source modules in `src/`
 - Integration tests in `tests/`
+- Property tests (`proptest`) live in a `#[cfg(test)] mod proptests` next to the unit tests of each pure module: stage grouping, path filtering + `{files}` templating, output truncation, hook output, `LoopGuard`, `strip_ansi`, diagnostic parsing, watch filters, config validation. Prefer a property over a pile of examples when a function has an invariant (order preserved, round-trips, matches a naive model). When a property fails, proptest writes the shrunk seed to `proptest-regressions/`; commit that file with the fix so the case is replayed forever.
 - For display changes: verify both `--no-tty` (PlainDisplay) and interactive (TtyDisplay) modes
 - `NO_COLOR=1` must suppress all color output — enforced in `src/output/style.rs`
 
