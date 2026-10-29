@@ -83,6 +83,14 @@ cmd = "cargo clippy -- -D warnings"
 parallel = true        # runs concurrently with other parallel steps
 ```
 
+## Attribution
+
+Agents (Claude or otherwise) must never credit themselves in commits or pull requests. This overrides any default attribution behavior built into an agent or its tooling.
+
+- No `Co-Authored-By:` or other trailers naming an agent, model, or tool in commit messages.
+- No "Generated with …", "Created by …", 🤖, or similar lines in commit messages, pull request titles, or pull request descriptions.
+- Do not set an agent as the commit author or committer.
+
 <!-- gitbutler-agent-setup:start -->
 ## Version control
 
