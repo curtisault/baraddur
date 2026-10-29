@@ -1,8 +1,8 @@
 [package]
 name = "baraddur"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.99"
 description = "Project-agnostic file watcher that surfaces issues before CI"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/curtisault/baraddur"
