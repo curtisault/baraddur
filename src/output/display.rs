@@ -535,13 +535,14 @@ fn try_clipboard_command(program: &str, args: &[&str], text: &str) -> bool {
         Ok(c) => c,
         Err(_) => return false,
     };
-    if let Some(mut stdin) = child.stdin.take() {
-        if stdin.write_all(text.as_bytes()).is_err() {
-            // Reap the child to avoid a zombie before bailing out.
-            let _ = child.wait();
-            return false;
-        }
-        // Dropping `stdin` here closes the pipe so the tool sees EOF.
+    // `stdin` is dropped at the end of this `if`, closing the pipe so the
+    // tool sees EOF before we wait on it.
+    if let Some(mut stdin) = child.stdin.take()
+        && stdin.write_all(text.as_bytes()).is_err()
+    {
+        // Reap the child to avoid a zombie before bailing out.
+        let _ = child.wait();
+        return false;
     }
     matches!(child.wait(), Ok(status) if status.success())
 }

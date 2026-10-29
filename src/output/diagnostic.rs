@@ -44,26 +44,26 @@ pub fn parse(output: &str) -> Vec<Diagnostic> {
 /// Exposed so the display can tag individual rendered lines as navigable.
 pub fn extract_line(line: &str) -> Option<Diagnostic> {
     // rustc / clippy primary span: `  --> path:line:col`
-    if let Some(idx) = line.find("--> ") {
-        if let Some(d) = parse_path_line_col(&line[idx + 4..]) {
-            return Some(d);
-        }
+    if let Some(idx) = line.find("--> ")
+        && let Some(d) = parse_path_line_col(&line[idx + 4..])
+    {
+        return Some(d);
     }
     // rustc context span: `  ::: path:line:col`
-    if let Some(idx) = line.find("::: ") {
-        if let Some(d) = parse_path_line_col(&line[idx + 4..]) {
-            return Some(d);
-        }
+    if let Some(idx) = line.find("::: ")
+        && let Some(d) = parse_path_line_col(&line[idx + 4..])
+    {
+        return Some(d);
     }
     // Rust 2021+ panic: `thread 'main' panicked at path:line:col:`
     // Rust legacy panic:  `thread 'main' panicked at 'msg', path:line:col`
     if let Some(idx) = line.find("panicked at ") {
         let rest = &line[idx + "panicked at ".len()..];
         // Legacy form has a `, ` separator between the message and the location.
-        if let Some(comma) = rest.find(", ") {
-            if let Some(d) = parse_path_line_col(&rest[comma + 2..]) {
-                return Some(d);
-            }
+        if let Some(comma) = rest.find(", ")
+            && let Some(d) = parse_path_line_col(&rest[comma + 2..])
+        {
+            return Some(d);
         }
         if let Some(d) = parse_path_line_col(rest) {
             return Some(d);

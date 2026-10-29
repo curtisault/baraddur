@@ -29,7 +29,7 @@ Coming soon — tap not yet published.
 
 ## From source
 
-Requires Rust 1.85 or newer.
+Requires Rust 1.99 or newer.
 
 ```bash
 just install
